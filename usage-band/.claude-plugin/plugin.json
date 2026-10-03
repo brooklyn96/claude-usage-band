@@ -1,0 +1,25 @@
+{
+  "name": "usage-band",
+  "version": "0.2.3",
+  "description": "Usage strip above the prompt: 5h and 7d limits, session tokens, context window and cost.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "glyphs": {
+      "type": "string",
+      "title": "Terminal glyphs",
+      "description": "nerd: Nerd Font icons and round pill ends. unicode: plain glyphs for terminals without a Nerd Font.",
+      "default": "nerd",
+      "options": [
+        "nerd",
+        "unicode"
+      ]
+    }
+  },
+  "author": {
+    "name": "brooklyn96",
+    "url": "https://github.com/brooklyn96"
+  },
+  "homepage": "https://github.com/brooklyn96/claude-usage-band",
+  "repository": "https://github.com/brooklyn96/claude-usage-band",
+  "license": "MIT"
+}

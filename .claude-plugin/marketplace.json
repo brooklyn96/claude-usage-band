@@ -1,0 +1,11 @@
+{
+  "name": "claude-usage-band",
+  "owner": { "name": "brooklyn96" },
+  "plugins": [
+    {
+      "name": "usage-band",
+      "source": "./usage-band",
+      "description": "A band above the Claude Code prompt: 5h / 7d quota left, tokens, context and session cost"
+    }
+  ]
+}
