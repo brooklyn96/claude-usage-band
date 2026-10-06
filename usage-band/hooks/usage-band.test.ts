@@ -290,7 +290,10 @@ test('terminal ladder: full, no cache, short bars, compact labels, wrap', () => 
 
     const at94 = termLayout(FULL, 94, glyphs, false)
     expect(at94).toMatchObject({ step: 3, width: 94, wrap: false, spacer: false })
-    expect(body(at94)).toContain('▏ ')
+    // the divider is the muted '▏' run, not a bare block glyph anywhere in the row
+    const dividers = at94.pills.flatMap(p => p.runs).filter(r => r.s.includes('▏'))
+    expect(dividers.length).toBeGreaterThan(0)
+    for (const r of dividers) expect(r.fg).toBe(TERM_PALETTE.dark.muted)
 
     // the user's terminal: one row, context and cost included
     const at86 = termLayout(FULL, 86, glyphs, false)
@@ -312,13 +315,55 @@ test('the time tick is the block glyph on the cell background, in both glyph mod
   for (const glyphs of ['nerd', 'unicode'] as const) {
     for (const light of [false, true]) {
       const pal = TERM_PALETTE[light ? 'light' : 'dark']
-      for (const [pill, bg] of [[tickPill(80), pal.fill], [tickPill(10), pal.track]] as const) {
+      for (const [pill, bg] of [[tickPill(80), pal.fill], [tickPill(59), pal.fill], [tickPill(58), pal.track], [tickPill(10), pal.track]] as const) {
         const runs = termPill(pill, glyphs, light)
         const ticks = runs.filter(r => r.fg === pal.tick)
         expect(ticks).toHaveLength(1)
         expect(ticks[0]!).toMatchObject({ s: '▎', bg })
         expect(cells([ticks[0]!])).toBe(1)
         expect(runs.map(r => r.s).join('')).not.toContain('┃')
+      }
+    }
+  }
+})
+
+test('bar fill is whole cells: round(percent/100*length) on 6, 4 and 3-cell bars', () => {
+  const pal = TERM_PALETTE.dark
+  const barRuns = (runs: Run[], fill: string) => runs.filter(r => r.bg === fill || r.bg === pal.track)
+  const filled = (runs: Run[], fill: string) =>
+    barRuns(runs, fill).filter(r => r.bg === fill).reduce((n, r) => n + cells([r]), 0)
+  // percent; filled cells on the 6-cell quota bar, the 4-cell bar (quota and context), the 3-cell context bar
+  const cases = [[0, 0, 0, 0], [8, 0, 0, 0], [9, 1, 0, 0], [50, 3, 2, 2], [92, 6, 4, 3], [100, 6, 4, 3]] as const
+  for (const [percent, six, four, three] of cases) {
+    const long = termPill({ id: '5h', percent, timeShare: null, left: '' }, 'nerd', false)
+    expect(cells(barRuns(long, pal.fill))).toBe(6)
+    expect(filled(long, pal.fill)).toBe(six)
+    const short = termPill({ id: '7d', percent, timeShare: null, left: '' }, 'nerd', false, 3)
+    expect(cells(barRuns(short, pal.fill))).toBe(4)
+    expect(filled(short, pal.fill)).toBe(four)
+    const ctx = pillsOf([], null, null, NOW, { tokens: percent * 2000, window: 200_000 })[0]!
+    const fill = pal.ctx[ctxLevel(ctx.percent)].fg
+    const wide = termPill(ctx, 'nerd', false)
+    const narrow = termPill(ctx, 'nerd', false, 3)
+    expect(cells(barRuns(wide, fill))).toBe(4)
+    expect(filled(wide, fill)).toBe(four)
+    expect(cells(barRuns(narrow, fill))).toBe(3)
+    expect(filled(narrow, fill)).toBe(three)
+  }
+})
+
+test('bar cells are spaces on the fill or track background, the tick the one glyph', () => {
+  for (const glyphs of ['nerd', 'unicode'] as const) {
+    for (const light of [false, true]) {
+      const pal = TERM_PALETTE[light ? 'light' : 'dark']
+      for (const step of [1, 2, 3, 4]) {
+        for (const p of FULL) {
+          if (p.id !== '5h' && p.id !== '7d' && p.id !== 'ctx') continue
+          const fill = p.id === 'ctx' ? pal.ctx[ctxLevel(p.percent)].fg : pal.fill
+          const bar = termPill(p, glyphs, light, step).filter(r => r.bg === fill || r.bg === pal.track)
+          expect(cells(bar)).toBe(p.id === 'ctx' ? (step >= 3 ? 3 : 4) : step >= 3 ? 4 : 6)
+          for (const r of bar) for (const c of [...r.s]) expect(c === '▎' || c === ' ').toBe(true)
+        }
       }
     }
   }

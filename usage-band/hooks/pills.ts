@@ -241,8 +241,6 @@ export const TERM_PALETTE = {
   light: { pill: COLORS, ctx: CTX_COLORS, text: INK, muted: MUTED, track: '#c5c8c4', fill: FILL, tick: TICK },
 } as const
 
-const EIGHTHS = ' ▏▎▍▌▋▊▉█'
-
 export const cells = (runs: Run[]): number => runs.reduce((n, r) => n + [...r.s].length, 0)
 
 /**
@@ -260,12 +258,13 @@ export const termPill = (p: Pill, glyphs: Glyphs, light: boolean, step = 1): Run
     if (last && last.fg === run.fg && last.bg === run.bg && !!last.bold === !!run.bold) last.s += s
     else runs.push(run)
   }
+  // Whole cells only: every bar cell is a space on the fill or track background, the tick the one glyph.
   const bar = (percent: number, n: number, fill: string, tickAt = -1) => {
-    const filled = Math.round((n * 8 * Math.min(100, percent)) / 100)
+    const filled = Math.min(n, Math.max(0, Math.round((percent / 100) * n)))
     for (let i = 0; i < n; i++) {
-      const eighths = Math.min(8, Math.max(0, filled - 8 * i))
-      if (i === tickAt) put('▎', pal.tick, { bg: eighths >= 4 ? fill : pal.track, bold: true })
-      else put(EIGHTHS[eighths]!, fill, { bg: pal.track })
+      const cellBg = i < filled ? fill : pal.track
+      if (i === tickAt) put('▎', pal.tick, { bg: cellBg, bold: true })
+      else put(' ', cellBg, { bg: cellBg })
     }
   }
   runs.push({ s: g.caps[0], fg: bg })
