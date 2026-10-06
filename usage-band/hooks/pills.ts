@@ -264,7 +264,7 @@ export const termPill = (p: Pill, glyphs: Glyphs, light: boolean, step = 1): Run
     const filled = Math.round((n * 8 * Math.min(100, percent)) / 100)
     for (let i = 0; i < n; i++) {
       const eighths = Math.min(8, Math.max(0, filled - 8 * i))
-      if (i === tickAt) put('┃', pal.tick, { bg: eighths >= 4 ? fill : pal.track, bold: true })
+      if (i === tickAt) put('▎', pal.tick, { bg: eighths >= 4 ? fill : pal.track, bold: true })
       else put(EIGHTHS[eighths]!, fill, { bg: pal.track })
     }
   }
@@ -280,7 +280,7 @@ export const termPill = (p: Pill, glyphs: Glyphs, light: boolean, step = 1): Run
       put(` ${g.left}`, fg)
       put(p.left.replace(' ', ''), pal.muted)
     } else if (p.left) {
-      put(' │ ', pal.muted)
+      put(' ▏ ', pal.muted)
       put(`${g.left} `, fg)
       put(p.left, pal.muted)
     }

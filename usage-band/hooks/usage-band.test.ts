@@ -2,7 +2,8 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, SessionRateLimit, TurnUsage } from 'claude-code'
 
-import { CTX_COLORS, TERM_PALETTE, alt, ctxLevel, formatCtxTokens, formatLeft, formatTokens, pillSvg, pillsOf, remainingFraction, termLayout, termPill } from './pills'
+import { CTX_COLORS, TERM_PALETTE, alt, cells, ctxLevel, formatCtxTokens, formatLeft, formatTokens, pillSvg, pillsOf, remainingFraction, termLayout, termPill } from './pills'
+import type { Run } from './pills'
 
 const H = 3_600_000
 const NOW = Date.UTC(2026, 9, 3, 12, 0, 0)
@@ -180,7 +181,8 @@ test('desktop tree holds the six pills in order, terminal the same figures', asy
     expect(next).toBeGreaterThan(at)
     at = next
   }
-  expect(text).toContain('┃')
+  expect(text).toContain('▎')
+  expect(text).not.toContain('┃')
   expect(text).toContain('') // nerd glyphs by default
   // each pill, the cost one included, on its own tinted background
   for (const id of ['5h', '7d', 'in', 'out', 'cache', 'cost'] as const) {
@@ -217,7 +219,7 @@ test('no tick when the reset time is unknown', async ($, on) => {
   const term = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', ...BAND })
   const text = (await term.findAll({ type: 'Text' })).map(t => t.text).join('')
   expect(text).toContain('80%')
-  expect(text).not.toContain('┃')
+  expect(text).not.toContain('▎')
 })
 
 test('tokens reset when another session is resumed', async ($, on) => {
@@ -288,7 +290,7 @@ test('terminal ladder: full, no cache, short bars, compact labels, wrap', () => 
 
     const at94 = termLayout(FULL, 94, glyphs, false)
     expect(at94).toMatchObject({ step: 3, width: 94, wrap: false, spacer: false })
-    expect(body(at94)).toContain('│ ')
+    expect(body(at94)).toContain('▏ ')
 
     // the user's terminal: one row, context and cost included
     const at86 = termLayout(FULL, 86, glyphs, false)
@@ -297,11 +299,41 @@ test('terminal ladder: full, no cache, short bars, compact labels, wrap', () => 
     expect(body(at86)).toContain('2h40m')
     expect(body(at86)).toContain('1d7h')
     expect(body(at86)).toContain('210k')
-    expect(body(at86)).not.toContain('│')
+    expect(body(at86)).not.toContain('▏')
 
     const at60 = termLayout(FULL, 60, glyphs, false)
     expect(at60).toMatchObject({ step: 5, wrap: true, spacer: false })
     expect(ids(at60)).toEqual(['5h', '7d', 'in', 'out', 'cache', 'ctx', 'cost'])
+  }
+})
+
+test('the time tick is the block glyph on the cell background, in both glyph modes and palettes', () => {
+  const tickPill = (percent: number) => ({ id: '5h' as const, percent, timeShare: 0.53, left: '' })
+  for (const glyphs of ['nerd', 'unicode'] as const) {
+    for (const light of [false, true]) {
+      const pal = TERM_PALETTE[light ? 'light' : 'dark']
+      for (const [pill, bg] of [[tickPill(80), pal.fill], [tickPill(10), pal.track]] as const) {
+        const runs = termPill(pill, glyphs, light)
+        const ticks = runs.filter(r => r.fg === pal.tick)
+        expect(ticks).toHaveLength(1)
+        expect(ticks[0]!).toMatchObject({ s: '▎', bg })
+        expect(cells([ticks[0]!])).toBe(1)
+        expect(runs.map(r => r.s).join('')).not.toContain('┃')
+      }
+    }
+  }
+})
+
+test('no cell carrying a background colour draws a box-drawing glyph', () => {
+  const boxDrawing = (s: string) => [...s].some(c => { const cp = c.codePointAt(0)!; return cp >= 0x2500 && cp <= 0x257f })
+  for (const glyphs of ['nerd', 'unicode'] as const) {
+    for (const light of [false, true]) {
+      for (const step of [1, 2, 3, 4]) {
+        const runs = FULL.reduce((all, p) => all.concat(termPill(p, glyphs, light, step)), [] as Run[])
+        expect(runs.map(r => r.s).join('')).not.toContain('┃')
+        for (const r of runs.filter(r => r.bg !== undefined)) expect(boxDrawing(r.s)).toBe(false)
+      }
+    }
   }
 })
 
@@ -329,7 +361,7 @@ test('context colour steps at 60 and above 85, background included', () => {
       expect(runs.some(r => r.bg === pal.bg)).toBe(true)
       expect(runs.some(r => r.fg === pal.fg)).toBe(true)
       expect(runs.map(r => r.s).join('')).toContain(formatCtxTokens(percent * 2000))
-      expect(runs.map(r => r.s).join('')).not.toContain('┃')
+      expect(runs.some(r => r.fg === TERM_PALETTE[light ? 'light' : 'dark'].tick)).toBe(false)
     }
   }
   expect(TERM_PALETTE.dark.ctx.ok.fg).not.toBe(TERM_PALETTE.dark.pill['5h'].fg)

@@ -1,6 +1,6 @@
 {
   "name": "usage-band",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Usage strip above the prompt: 5h and 7d limits, session tokens, context window and cost.",
   "types": "./types/index.d.ts",
   "userConfig": {
