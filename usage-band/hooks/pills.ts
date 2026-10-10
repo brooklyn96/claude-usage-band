@@ -10,7 +10,11 @@ export type RatePill = { id: '5h' | '7d'; percent: number; timeShare: number | n
 export type ValuePill = { id: 'in' | 'out' | 'cache' | 'cost'; value: string }
 /** `tokens` is the last response's input side; `percent` is the context window USED (what auto-compact reacts to), unlike the quota pills. */
 export type ContextPill = { id: 'ctx'; tokens: number; percent: number }
-export type Pill = RatePill | ValuePill | ContextPill
+/** `remaining` is the share of the cache TTL still warm (0 once expired); `label` the countdown text. */
+export type WarmPill = { id: 'warm'; remaining: number; label: string }
+export type Pill = RatePill | ValuePill | ContextPill | WarmPill
+/** When the main thread last refreshed its prompt cache, and the TTL that refresh reset: the warm pill's inputs. */
+export type WarmReading = { at: number; ttl: number }
 
 export const formatTokens = (n: number): string => {
   if (n < 1000) return String(Math.round(n))
@@ -36,6 +40,12 @@ export const formatLeft = (ms: number): string => {
   return `${m}m`
 }
 
+/** The warm countdown text: whole minutes rounded up (`57m`), `<1m` under one, `cold` once expired. */
+export const formatWarm = (ms: number): string => {
+  if (ms <= 0) return 'cold'
+  return ms < MIN ? '<1m' : `${Math.ceil(ms / MIN)}m`
+}
+
 /** (resetsAt - now) / window, clamped to 0..1; null when the reset is unknown. */
 export const remainingFraction = (limit: Limit, now: number): number | null => {
   const window = WINDOWS[limit.kind as keyof typeof WINDOWS]
@@ -44,7 +54,7 @@ export const remainingFraction = (limit: Limit, now: number): number | null => {
   return Math.min(1, Math.max(0, (resets - now) / window))
 }
 
-export const pillsOf = (limits: Limit[], tokens: Tokens | null, cost: number | null, now: number, context: ContextUsage | null = null): Pill[] => {
+export const pillsOf = (limits: Limit[], tokens: Tokens | null, cost: number | null, now: number, context: ContextUsage | null = null, warm: WarmReading | null = null): Pill[] => {
   const pills: Pill[] = []
   for (const [kind, id] of [['five_hour', '5h'], ['seven_day', '7d']] as const) {
     const limit = limits.find(l => l.kind === kind)
@@ -56,6 +66,10 @@ export const pillsOf = (limits: Limit[], tokens: Tokens | null, cost: number | n
     pills.push({ id: 'in', value: formatTokens(tokens.input) })
     pills.push({ id: 'out', value: formatTokens(tokens.output) })
     pills.push({ id: 'cache', value: formatTokens(tokens.cache) })
+  }
+  if (warm !== null) {
+    const left = warm.ttl - (now - warm.at)
+    pills.push({ id: 'warm', remaining: Math.min(1, Math.max(0, left / warm.ttl)), label: formatWarm(left) })
   }
   if (context !== null) {
     const percent = context.percent ?? (context.window > 0 ? (context.tokens * 100) / context.window : 0)
@@ -69,6 +83,16 @@ export const isRate = (p: Pill): p is RatePill => p.id === '5h' || p.id === '7d'
 
 /** Context fill step: below 60% calm, 60-85% amber, above 85% red. */
 export const ctxLevel = (percent: number) => (percent > 85 ? 'high' : percent >= 60 ? 'warn' : 'ok')
+/** Warm step: above half the TTL calm, 20-50% amber, under 20% red, expired muted. */
+export const warmLevel = (remaining: number) => (remaining <= 0 ? 'cold' : remaining > 0.5 ? 'ok' : remaining >= 0.2 ? 'warn' : 'high')
+
+export const STRIP_BG = '#f1f0ec'
+const INK = '#2b2b2b'
+const MUTED = '#6f6f6f'
+const FILL = '#8db36a'
+export const TRACK = '#d9d9d6'
+const TICK = '#333333'
+const DIVIDER = '#b9c2c0'
 
 // Colours sampled from the reference (light theme).
 export const COLORS = {
@@ -83,14 +107,9 @@ export const CTX_COLORS = {
   ok: { bg: '#d6eaee', fg: '#26879c' },
   warn: { bg: '#f7e3cb', fg: '#c46a12' },
   high: { bg: '#f6d5d8', fg: '#c62f3e' },
+  // The warm pill's expired step: muted ink on a grey distinct from the bar's track, so the empty bar stays visible.
+  cold: { bg: '#a9b0ac', fg: MUTED },
 } as const
-export const STRIP_BG = '#f1f0ec'
-const INK = '#2b2b2b'
-const MUTED = '#6f6f6f'
-const FILL = '#8db36a'
-const TRACK = '#d9d9d6'
-const TICK = '#333333'
-const DIVIDER = '#b9c2c0'
 
 export const alt = (p: Pill): string => {
   if (isRate(p)) {
@@ -98,6 +117,7 @@ export const alt = (p: Pill): string => {
     return `${name} limit ${p.percent}% left${p.left ? `, resets in ${p.left}` : ''}`
   }
   if (p.id === 'ctx') return `context ${formatCtxTokens(p.tokens)} tokens (${p.percent}% of window)`
+  if (p.id === 'warm') return p.label === 'cold' ? 'Prompt cache cold' : `Prompt cache warm for ${p.label}`
   return { in: 'Input tokens', out: 'Output tokens', cache: 'Cache read', cost: 'Session cost' }[p.id] + ` ${p.value}`
 }
 
@@ -119,6 +139,10 @@ const ICONS = {
     '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>' +
     '<path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>' +
     '<path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M12 5v13"/>',
+  warm:
+    '<path d="M5 22h14"/><path d="M5 2h14"/>' +
+    '<path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/>' +
+    '<path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/>',
 } as const
 
 // Sizes measured on the reference at 1x.
@@ -140,7 +164,7 @@ const text = (s: string, x: number, color: string, bold = false) =>
 
 /** One pill as an SVG document and its width in CSS pixels. */
 export const pillSvg = (p: Pill): { source: string; width: number } => {
-  const { bg, fg } = p.id === 'ctx' ? CTX_COLORS[ctxLevel(p.percent)] : COLORS[p.id]
+  const { bg, fg } = p.id === 'ctx' ? CTX_COLORS[ctxLevel(p.percent)] : p.id === 'warm' ? CTX_COLORS[warmLevel(p.remaining)] : COLORS[p.id]
   const parts: string[] = []
   let x = 9
   if (isRate(p)) {
@@ -182,6 +206,17 @@ export const pillSvg = (p: Pill): { source: string; width: number } => {
     const figure = formatCtxTokens(p.tokens)
     parts.push(text(figure, x, INK, true))
     x += figure.length * CHAR + 10
+  } else if (p.id === 'warm') {
+    parts.push(icon('warm', x, ICON, fg))
+    x += ICON + 7
+    const y = (H - 4) / 2
+    parts.push(
+      `<rect x="${x}" y="${y}" width="${CTX_BAR}" height="4" rx="2" fill="${TRACK}"/>`,
+      `<rect x="${x}" y="${y}" width="${Math.round(CTX_BAR * p.remaining * 100) / 100}" height="4" rx="2" fill="${fg}"/>`,
+    )
+    x += CTX_BAR + 8
+    parts.push(text(p.label, x, INK, true))
+    x += p.label.length * CHAR + 10
   } else {
     parts.push(icon(p.id, x, ICON, fg))
     x += ICON + 7.5
@@ -212,9 +247,10 @@ const GLYPHS = {
     cache: '\u{f0328}', // md-layers
     cost: '', // fa-coins: md has no currency-usd circle
     ctx: '\u{f09d1}', // md-brain
+    warm: '\u{f051f}', // md-timer_sand
   },
   // Only glyphs Cascadia Mono has, all single width.
-  unicode: { caps: ['▐', '▌'], '5h': '◔', '7d': '▤', left: '◷', in: '↑', out: '↓', cache: '≡', cost: '◉', ctx: '◐' },
+  unicode: { caps: ['▐', '▌'], '5h': '◔', '7d': '▤', left: '◷', in: '↑', out: '↓', cache: '≡', cost: '◉', ctx: '◐', warm: '◶' },
 } as const
 
 export const TERM_PALETTE = {
@@ -231,6 +267,7 @@ export const TERM_PALETTE = {
       ok: { bg: '#14353d', fg: '#4cc3d9' },
       warn: { bg: '#48300f', fg: '#ff9f43' },
       high: { bg: '#4d1a22', fg: '#ff5c6c' },
+      cold: { bg: '#333936', fg: '#a9b1af' },
     },
     text: '#ececea',
     muted: '#a9b1af',
@@ -250,7 +287,7 @@ export const cells = (runs: Run[]): number => runs.reduce((n, r) => n + [...r.s]
 export const termPill = (p: Pill, glyphs: Glyphs, light: boolean, step = 1): Run[] => {
   const g = GLYPHS[glyphs]
   const pal = TERM_PALETTE[light ? 'light' : 'dark']
-  const { bg, fg } = p.id === 'ctx' ? pal.ctx[ctxLevel(p.percent)] : pal.pill[p.id]
+  const { bg, fg } = p.id === 'ctx' ? pal.ctx[ctxLevel(p.percent)] : p.id === 'warm' ? pal.ctx[warmLevel(p.remaining)] : pal.pill[p.id]
   const runs: Run[] = []
   const put = (s: string, color: string, extra: Partial<Run> = {}) => {
     const run = { s, fg: color, bg, ...extra }
@@ -288,6 +325,11 @@ export const termPill = (p: Pill, glyphs: Glyphs, light: boolean, step = 1): Run
     bar(p.percent, step >= 3 ? 3 : 4, fg)
     put(' ', fg)
     put(formatCtxTokens(p.tokens), pal.text, { bold: true })
+  } else if (p.id === 'warm') {
+    put(`${g.warm} `, fg)
+    bar(p.remaining * 100, step >= 3 ? 3 : 4, fg)
+    put(' ', fg)
+    put(p.label, pal.text, { bold: true })
   } else {
     put(`${g[p.id]} `, fg)
     put(p.value, pal.text)
@@ -298,18 +340,22 @@ export const termPill = (p: Pill, glyphs: Glyphs, light: boolean, step = 1): Run
 
 /**
  * The terminal row at `columns`, the first step that fits: 1 every pill;
- * 2 without the cache pill; 3 shorter bars (quota 6 -> 4 cells, context
- * 4 -> 3); 4 compact time labels; 5 every pill, wrapped. Width counts one gap
- * between pills; the cost pill's spacer (one more gap) shows only when it fits.
+ * 2 without the cache pill; 3 shorter bars (quota 6 -> 4 cells, context and
+ * warm 4 -> 3); 4 compact time labels; 5 also without the token-total pills;
+ * 6 every pill, wrapped. Width counts one gap between pills; the cost pill's
+ * spacer (one more gap) shows only when it fits.
  */
 export const termLayout = (pills: Pill[], columns: number, glyphs: Glyphs, light: boolean) => {
   const build = (step: number) => {
-    const row = pills.filter(p => step < 2 || step > 4 || p.id !== 'cache').map(p => ({ id: p.id, runs: termPill(p, glyphs, light, step > 4 ? 1 : step) }))
+    const row = pills
+      .filter(p => step < 2 || step > 5 || p.id !== 'cache')
+      .filter(p => step !== 5 || (p.id !== 'in' && p.id !== 'out'))
+      .map(p => ({ id: p.id, runs: termPill(p, glyphs, light, step > 5 ? 1 : step) }))
     return { pills: row, width: row.reduce((n, p) => n + cells(p.runs) + 1, -1), step }
   }
-  for (let step = 1; step <= 4; step++) {
+  for (let step = 1; step <= 5; step++) {
     const row = build(step)
     if (row.width <= columns) return { ...row, wrap: false, spacer: row.pills.some(p => p.id === 'cost') && row.width + 1 <= columns }
   }
-  return { ...build(5), wrap: true, spacer: false }
+  return { ...build(6), wrap: true, spacer: false }
 }

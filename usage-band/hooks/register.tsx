@@ -10,6 +10,8 @@ const costAtom = atom({ plugin: 'usage-band', key: 'cost' } as const, null)
 const tokensAtom = atom({ plugin: 'usage-band', key: 'tokens' } as const, null)
 // `tokens` shape: the value changed from a bare percent to the token reading.
 const contextAtom = atom({ plugin: 'usage-band', key: 'context' } as const, null, { shape: 'tokens' })
+// When the main thread's last response landed: the prompt cache's warm countdown.
+const warmAtom = atom({ plugin: 'usage-band', key: 'cacheWarm' } as const, null)
 const nowAtom = atom({ plugin: 'usage-band', key: 'now' } as const, 0)
 
 /** `context` only when its fill moved (or on a full reading); `tokens` is absent before the first response. */
@@ -61,6 +63,8 @@ function start($: EngineInterface) {
 
 export const register: Register = (on, options) => {
   const glyphs = options.glyphs === 'unicode' ? 'unicode' : 'nerd'
+  // The prompt cache TTL the option names, in ms.
+  const warmTtl = (options.cacheTtl === '5m' ? 5 : 60) * 60_000
 
   on('session.start', async ($, e, next) => {
     await refresh($)
@@ -78,6 +82,11 @@ export const register: Register = (on, options) => {
   on('turn.step', async function* ($, e, next) {
     const result = yield* next(e)
     await spent($, result.usage)
+    // Only the main thread's cache matters; a subagent's loop writes its own.
+    if (result.usage && e.agentId === undefined) {
+      const at = await $.clock.now()
+      await update($, warmAtom, () => at)
+    }
     return result
   })
 
@@ -89,11 +98,13 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
-    // Cost follows the new session's ledger on both, so the token totals and the
-    // context fill start over too: the new session's first measure brings them back.
+    // Cost follows the new session's ledger on both, so the token totals, the
+    // context fill and the warm countdown start over too: the new session's
+    // first measure brings the figures back, its first response the countdown.
     if (e.reason === 'clear' || e.reason === 'resume') {
       await update($, tokensAtom, () => null)
       await update($, contextAtom, () => null)
+      await update($, warmAtom, () => null)
     }
     return next(e)
   })
@@ -105,12 +116,14 @@ export const register: Register = (on, options) => {
     }
     if (e.props.hasSurvey) return next(e)
     await read($, nowAtom) // subscribes: the minute timer redraws the band
+    const warmAt = await read($, warmAtom) // subscribes: a response restarts the countdown
     const pills = pillsOf(
       await read($, limitsAtom),
       await read($, tokensAtom),
       await read($, costAtom),
       await $.clock.now(),
       await read($, contextAtom),
+      warmAt === null ? null : { at: warmAt, ttl: warmTtl },
     )
     if (pills.length === 0) return next(e)
 

@@ -11,6 +11,8 @@ declare module 'claude-code' {
       tokens: Tokens | null
       /** Live context window reading; null before the first response fills it. */
       context: Shaped<ContextUsage | null>
+      /** When the main thread's last response landed: the warm countdown's start; null before one, and on clear and resume. */
+      cacheWarm: number | null
       now: number
     }
   }

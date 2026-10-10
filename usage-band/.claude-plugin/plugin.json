@@ -1,7 +1,7 @@
 {
   "name": "usage-band",
-  "version": "0.2.5",
-  "description": "Usage strip above the prompt: 5h and 7d limits, session tokens, context window and cost.",
+  "version": "0.3.0",
+  "description": "Usage strip above the prompt: 5h and 7d limits, session tokens, context window, cache warmth and cost.",
   "types": "./types/index.d.ts",
   "userConfig": {
     "glyphs": {
@@ -12,6 +12,16 @@
       "options": [
         "nerd",
         "unicode"
+      ]
+    },
+    "cacheTtl": {
+      "type": "string",
+      "title": "Prompt cache TTL",
+      "description": "How long the prompt cache stays warm after the main thread's last response: 1h for the cache Claude Code writes for the main thread, 5m for a session that writes the 5-minute one.",
+      "default": "1h",
+      "options": [
+        "1h",
+        "5m"
       ]
     }
   },

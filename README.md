@@ -1,6 +1,6 @@
 # claude-usage-band
 
-A Claude Code plugin marketplace with one mod, `usage-band`: a band above the prompt showing quota, tokens, context and session cost.
+A Claude Code plugin marketplace with one mod, `usage-band`: a band above the prompt showing quota, tokens, context, cache warmth and session cost.
 
 Preview renders:
 
@@ -17,14 +17,15 @@ Preview renders:
 | Tokens up | Input tokens plus cache writes. |
 | Tokens down | Output tokens. |
 | Cache reads | Tokens read from the prompt cache. |
+| Cache warm | Time the main thread's prompt cache stays warm after its last response: `57m`, `<1m`, or `cold`; bar and colour show the share of the TTL left. |
 | Context | Tokens of the last request. Bar and colour by fill: under 60% calm, 60-85% amber, over 85% red. |
 | Cost | Session cost in US dollars. |
 
 ## When figures update
 
-- After every API response: quota, cost, context fill and token totals.
+- After every API response: quota, cost, context fill, token totals and the cache countdown.
 - Reset countdowns redraw every 30 seconds.
-- Token totals and context start over on `/clear` and on resume.
+- Token totals, context and the cache countdown start over on `/clear` and on resume.
 
 ## Requirements
 
@@ -60,9 +61,11 @@ claude plugin update usage-band@claude-usage-band
 
 `glyphs`: `nerd` (default) or `unicode`. Set it through `/plugin` (configure).
 
+`cacheTtl`: `1h` (default) or `5m` — how long the main thread's prompt cache stays warm, and so what the warm pill counts down from.
+
 ## Narrow terminals
 
-When the row does not fit, the cache pill drops first, then bars shorten and time labels go compact, then every pill wraps onto the next line at full size.
+When the row does not fit, the cache pill drops first, then bars shorten and time labels go compact, then the token up/down pills hide too, then every pill wraps onto the next line at full size.
 
 ## Development
 

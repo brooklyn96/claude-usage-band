@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, SessionRateLimit, TurnUsage } from 'claude-code'
 
-import { CTX_COLORS, TERM_PALETTE, alt, cells, ctxLevel, formatCtxTokens, formatLeft, formatTokens, pillSvg, pillsOf, remainingFraction, termLayout, termPill } from './pills'
+import { CTX_COLORS, TERM_PALETTE, TRACK, alt, cells, ctxLevel, formatCtxTokens, formatLeft, formatTokens, formatWarm, pillSvg, pillsOf, remainingFraction, termLayout, termPill, warmLevel } from './pills'
 import type { Run } from './pills'
 
 const H = 3_600_000
@@ -47,9 +47,9 @@ const usageOf = (input: number, output: number, read: number, write: number): Tu
   cache_read_input_tokens: read,
   cache_creation_input_tokens: write,
 })
-async function respond($: Engine, turnId: string, index: number, usage: TurnUsage | null) {
+async function respond($: Engine, turnId: string, index: number, usage: TurnUsage | null, agentId?: string) {
   reply = usage
-  const stream = $.turn.step({ turnId, index, model: 'claude-opus-5-5', messageCount: 1 })
+  const stream = $.turn.step({ turnId, index, model: 'claude-opus-5-5', messageCount: 1, ...(agentId === undefined ? {} : { agentId }) })
   for await (const _ of stream);
   return stream.result
 }
@@ -88,6 +88,17 @@ test('formats time left', () => {
   expect(formatLeft(-5)).toBe('0m')
 })
 
+test('formats the warm countdown in whole minutes rounded up', () => {
+  expect(formatWarm(57 * 60_000)).toBe('57m')
+  expect(formatWarm(60 * 60_000)).toBe('60m')
+  expect(formatWarm(57 * 60_000 + 1)).toBe('58m')
+  expect(formatWarm(5 * 60_000)).toBe('5m')
+  expect(formatWarm(59_999)).toBe('<1m')
+  expect(formatWarm(1)).toBe('<1m')
+  expect(formatWarm(0)).toBe('cold')
+  expect(formatWarm(-5_000)).toBe('cold')
+})
+
 test('tick is the share of time remaining in the window', () => {
   expect(Math.round(remainingFraction(LIMITS[0]!, NOW)! * 1000)).toBe(533)
   expect(Math.round(remainingFraction(LIMITS[1]!, NOW)! * 1000)).toBe(185)
@@ -110,6 +121,46 @@ test('pills with no data are left out', () => {
   expect(p).toMatchObject({ id: '5h', percent: 80, left: '2h 40m' })
 })
 
+test('the warm pill sits after the cache pill, its bar and colour stepping by the share left', () => {
+  const TTL = 60 * 60_000
+  const warmPill = (remaining: number) => pillsOf([], null, null, NOW, null, { at: NOW - (1 - remaining) * TTL, ttl: TTL })[0]!
+  expect(pillsOf([], { input: 15_600, output: 3_000, cache: 954_200 }, 4.32, NOW, { tokens: 210_400, window: 1_000_000 }, { at: NOW, ttl: TTL }).map(p => p.id)).toEqual([
+    'in', 'out', 'cache', 'warm', 'ctx', 'cost',
+  ])
+  expect(warmPill(1)).toMatchObject({ id: 'warm', remaining: 1, label: '60m' })
+  expect(warmPill(0.75)).toMatchObject({ remaining: 0.75, label: '45m' })
+  expect(warmPill(0)).toMatchObject({ remaining: 0, label: 'cold' })
+
+  // over half the TTL calm, 20-50% amber, under 20% red, expired muted
+  expect(warmLevel(1)).toBe('ok')
+  expect(warmLevel(0.51)).toBe('ok')
+  expect(warmLevel(0.5)).toBe('warn')
+  expect(warmLevel(0.2)).toBe('warn')
+  expect(warmLevel(0.199)).toBe('high')
+  expect(warmLevel(0.001)).toBe('high')
+  expect(warmLevel(0)).toBe('cold')
+
+  for (const [remaining, level] of [[0.75, 'ok'], [0.25, 'warn'], [0.125, 'high'], [0, 'cold']] as const) {
+    const pill = warmPill(remaining)
+    expect(pillSvg(pill).source).toContain(`fill="${CTX_COLORS[level].bg}"`)
+    expect(pillSvg(pill).source).toContain(`fill="${CTX_COLORS[level].fg}"`)
+    for (const light of [false, true]) {
+      const pal = TERM_PALETTE[light ? 'light' : 'dark'].ctx[level]
+      const runs = termPill(pill, 'nerd', light)
+      expect(runs.some(r => r.bg === pal.bg)).toBe(true)
+      expect(runs.some(r => r.fg === pal.fg)).toBe(true)
+      // whole cells: the filled share of the 4-cell bar, 3 when short
+      expect(cells(termPill(pill, 'nerd', light).filter(r => r.bg === pal.fg))).toBe(Math.round(remaining * 4))
+      expect(cells(termPill(pill, 'nerd', light, 3).filter(r => r.bg === pal.fg))).toBe(Math.round(remaining * 3))
+    }
+  }
+
+  // the cold pill's grey stays distinct from every bar track, or the empty bar disappears
+  expect(CTX_COLORS.cold.bg).not.toBe(TRACK)
+  expect(TERM_PALETTE.light.ctx.cold.bg).not.toBe(TERM_PALETTE.light.track)
+  expect(TERM_PALETTE.dark.ctx.cold.bg).not.toBe(TERM_PALETTE.dark.track)
+})
+
 test('band passes when nothing has data, and yields to a survey', async ($, on) => {
   engine(on, [])
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -127,7 +178,7 @@ test('token totals add up across two responses', async ($, on) => {
   await respond($, 't2', 0, usageOf(2000, 2500, 554_200, 10_000))
   const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
   const alts = (await ui.findAll({ type: 'Svg' })).map(s => String(s.props.alt))
-  expect(alts).toEqual(['Input tokens 15.6k', 'Output tokens 3.0k', 'Cache read 954.2k'])
+  expect(alts).toEqual(['Input tokens 15.6k', 'Output tokens 3.0k', 'Cache read 954.2k', 'Prompt cache warm for 60m'])
 })
 
 test('token totals move after each response, before the turn ends', async ($, on) => {
@@ -136,9 +187,9 @@ test('token totals move after each response, before the turn ends', async ($, on
   const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
   const alts = async () => (await ui.findAll({ type: 'Svg' })).map(s => String(s.props.alt))
   await respond($, 't1', 0, usageOf(1000, 500, 400_000, 2_600))
-  expect(await alts()).toEqual(['Input tokens 3.6k', 'Output tokens 500', 'Cache read 400.0k', 'Session cost $0.50'])
+  expect(await alts()).toEqual(['Input tokens 3.6k', 'Output tokens 500', 'Cache read 400.0k', 'Prompt cache warm for 60m', 'Session cost $0.50'])
   await respond($, 't1', 1, usageOf(2000, 2500, 554_200, 10_000))
-  expect(await alts()).toEqual(['Input tokens 15.6k', 'Output tokens 3.0k', 'Cache read 954.2k', 'Session cost $0.50'])
+  expect(await alts()).toEqual(['Input tokens 15.6k', 'Output tokens 3.0k', 'Cache read 954.2k', 'Prompt cache warm for 60m', 'Session cost $0.50'])
   // a response with no usage (interrupted, failed) adds nothing
   await respond($, 't1', 2, null)
   expect(await alts()).toContain('Input tokens 15.6k')
@@ -151,10 +202,10 @@ test("a turn's end adds nothing on top of its responses", async ($, on) => {
   await $.turn.complete({ ...turn(3000, 3000, 954_200, 12_600), turnId: 't1' })
   const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
   const alts = (await ui.findAll({ type: 'Svg' })).map(s => String(s.props.alt))
-  expect(alts).toEqual(['Input tokens 15.6k', 'Output tokens 3.0k', 'Cache read 954.2k'])
+  expect(alts).toEqual(['Input tokens 15.6k', 'Output tokens 3.0k', 'Cache read 954.2k', 'Prompt cache warm for 60m'])
 })
 
-test('desktop tree holds the six pills in order, terminal the same figures', async ($, on) => {
+test('desktop tree holds the pills in order, terminal the same figures', async ($, on) => {
   engine(on, LIMITS, 4.321)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await respond($, 't1', 0, usageOf(3000, 3000, 954_200, 12_600))
@@ -167,6 +218,7 @@ test('desktop tree holds the six pills in order, terminal the same figures', asy
     'Input tokens 15.6k',
     'Output tokens 3.0k',
     'Cache read 954.2k',
+    'Prompt cache warm for 60m',
     'Session cost $4.32',
   ])
   expect(String(svgs[0]!.props.source)).toContain('monospace')
@@ -174,7 +226,7 @@ test('desktop tree holds the six pills in order, terminal the same figures', asy
 
   const term = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', ...BAND })
   const text = (await term.drawn()) && (await term.findAll({ type: 'Text' })).map(t => t.text).join('')
-  const order = ['5h', '80%', '2h 40m', '7d', '42%', '1d 7h', '15.6k', '3.0k', '954.2k', '$4.32']
+  const order = ['5h', '80%', '2h 40m', '7d', '42%', '1d 7h', '15.6k', '3.0k', '60m', '$4.32']
   let at = -1
   for (const figure of order) {
     const next = text.indexOf(figure, at + 1)
@@ -183,13 +235,18 @@ test('desktop tree holds the six pills in order, terminal the same figures', asy
   }
   expect(text).toContain('▎')
   expect(text).not.toContain('┃')
+  expect(text).toContain('\u{f051f}') // the warm pill's md-timer_sand
   expect(text).toContain('') // nerd glyphs by default
   // each pill, the cost one included, on its own tinted background
-  for (const id of ['5h', '7d', 'in', 'out', 'cache', 'cost'] as const) {
+  for (const id of ['5h', '7d', 'in', 'out', 'cost'] as const) {
     const pill = await term.find({ key: id })
     const bgs = (pill!.children as { props?: { backgroundColor?: string } }[]).map(c => c.props?.backgroundColor)
     expect(bgs).toContain(TERM_PALETTE.dark.pill[id].bg)
   }
+  // the warm pill's tint is its level's, not a fixed pill colour
+  const warm = await term.find({ key: 'warm' })
+  const warmBgs = (warm!.children as { props?: { backgroundColor?: string } }[]).map(c => c.props?.backgroundColor)
+  expect(warmBgs).toContain(TERM_PALETTE.dark.ctx.ok.bg)
 
   const survey = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND, props: { ...BAND.props, hasSurvey: true } })
   expect(await survey.findAll({ type: 'Svg' })).toHaveLength(0)
@@ -263,6 +320,66 @@ test('other end reasons keep the context fill', async ($, on) => {
   expect(alts).toContain('context 82k tokens (41% of window)')
 })
 
+test('the warm countdown starts on a main-thread response and ticks with the clock', async ($, on) => {
+  const clock = engine(on, [])
+  await respond($, 't1', 0, usageOf(1000, 500, 400_000, 2_600))
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
+  const alts = async () => (await ui.findAll({ type: 'Svg' })).map(s => String(s.props.alt))
+  expect(await alts()).toContain('Prompt cache warm for 60m')
+  await clock.advance(3 * 60_000)
+  expect(await alts()).toContain('Prompt cache warm for 57m')
+})
+
+test('a subagent step leaves the warm countdown alone', async ($, on) => {
+  const clock = engine(on, [])
+  await respond($, 't1', 0, usageOf(1000, 500, 400_000, 2_600))
+  await clock.advance(4 * 60_000)
+  await respond($, 't1', 1, usageOf(2000, 2500, 554_200, 10_000), 'sub-1')
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
+  const alts = (await ui.findAll({ type: 'Svg' })).map(s => String(s.props.alt))
+  expect(alts).toContain('Input tokens 15.6k')
+  expect(alts).toContain('Prompt cache warm for 56m')
+})
+
+test('the warm countdown resets on clear and resume, back on the next response', async ($, on) => {
+  engine(on, [])
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+  await respond($, 't1', 0, usageOf(1000, 500, 400_000, 2_600))
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
+  const alts = async () => (await ui.findAll({ type: 'Svg' })).map(s => String(s.props.alt))
+  expect(await alts()).toContain('Prompt cache warm for 60m')
+  for (const reason of ['clear', 'resume'] as const) {
+    await $.session.end({ reason, sessionId: 's1', resume: { id: 's0' } })
+    expect(await alts()).toHaveLength(0)
+    await respond($, 't2', 0, usageOf(1000, 500, 400_000, 2_600))
+    expect(await alts()).toContain('Prompt cache warm for 60m')
+  }
+})
+
+test('the 5m cacheTtl option counts the short cache down to cold', { options: { cacheTtl: '5m' } }, async ($, on) => {
+  const clock = engine(on, [])
+  await respond($, 't1', 0, usageOf(1000, 500, 400_000, 2_600))
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
+  const alts = async () => (await ui.findAll({ type: 'Svg' })).map(s => String(s.props.alt))
+  expect(await alts()).toContain('Prompt cache warm for 5m')
+  await clock.advance(5 * 60_000)
+  expect(await alts()).toContain('Prompt cache cold')
+})
+
+test("the user's 86-column terminal keeps 5h, 7d, cache warm, context and cost on one line", async ($, on) => {
+  engine(on, LIMITS, 4.32)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.session.measure({ context: { window: 200_000, tokens: 210_400, percent: 21 }, rateLimits: LIMITS, cost: { usd: 4.32 }, changed: ['context'] })
+  await respond($, 't1', 0, usageOf(3000, 3000, 954_200, 12_600))
+  const term = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', ...BAND, props: { ...BAND.props, bodyColumns: 86 } })
+  expect(await term.drawn()).toMatchObject({ type: 'Box', props: { flexWrap: 'nowrap' } })
+  // exactly this pill set: the token up/down pills are the ones the 86-column row drops
+  for (const id of ['5h', '7d', 'warm', 'ctx', 'cost'] as const) expect(await term.find({ key: id })).toBeDefined()
+  for (const id of ['in', 'out', 'cache'] as const) expect(await term.find({ key: id })).toBeUndefined()
+  const text = (await term.findAll({ type: 'Text' })).map(t => t.text).join('')
+  for (const figure of ['5h', '80%', '2h40m', '7d', '42%', '1d7h', '60m', '210k', '$4.32']) expect(text).toContain(figure)
+})
+
 test('a reload with no session.start still reads usage and keeps the clock', async ($, on) => {
   const clock = engine(on, LIMITS, 4.32)
   const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
@@ -274,39 +391,45 @@ test('a reload with no session.start still reads usage and keeps the clock', asy
   expect(String((await ui.findAll({ type: 'Svg' }))[0]!.props.alt)).toContain('2h 39m')
 })
 
-const FULL = pillsOf(LIMITS, { input: 15_600, output: 3_000, cache: 954_200 }, 4.32, NOW, { tokens: 210_400, window: 1_000_000 })
+const FULL = pillsOf(LIMITS, { input: 15_600, output: 3_000, cache: 954_200 }, 4.32, NOW, { tokens: 210_400, window: 1_000_000 }, { at: NOW, ttl: 60 * 60_000 })
 const ids = (row: { pills: { id: string }[] }) => row.pills.map(p => p.id)
 const body = (row: { pills: { runs: { s: string }[] }[] }) => row.pills.map(p => p.runs.map(r => r.s).join('')).join(' ')
 
-test('terminal ladder: full, no cache, short bars, compact labels, wrap', () => {
+test('terminal ladder: full, no cache, short bars, compact labels, no token pills, wrap', () => {
   for (const glyphs of ['nerd', 'unicode'] as const) {
+    const at124 = termLayout(FULL, 124, glyphs, false)
+    expect(at124).toMatchObject({ step: 1, width: 123, wrap: false, spacer: true })
+    expect(ids(at124)).toEqual(['5h', '7d', 'in', 'out', 'cache', 'warm', 'ctx', 'cost'])
+
     const at120 = termLayout(FULL, 120, glyphs, false)
-    expect(at120).toMatchObject({ step: 1, width: 110, wrap: false, spacer: true })
-    expect(ids(at120)).toEqual(['5h', '7d', 'in', 'out', 'cache', 'ctx', 'cost'])
-
-    const at100 = termLayout(FULL, 100, glyphs, false)
-    expect(at100).toMatchObject({ step: 2, width: 99, wrap: false, spacer: true })
-    expect(ids(at100)).toEqual(['5h', '7d', 'in', 'out', 'ctx', 'cost'])
-
-    const at94 = termLayout(FULL, 94, glyphs, false)
-    expect(at94).toMatchObject({ step: 3, width: 94, wrap: false, spacer: false })
+    expect(at120).toMatchObject({ step: 2, width: 112, wrap: false, spacer: true })
+    expect(ids(at120)).toEqual(['5h', '7d', 'in', 'out', 'warm', 'ctx', 'cost'])
     // the divider is the muted '▏' run, not a bare block glyph anywhere in the row
-    const dividers = at94.pills.flatMap(p => p.runs).filter(r => r.s.includes('▏'))
+    const dividers = at120.pills.flatMap(p => p.runs).filter(r => r.s.includes('▏'))
     expect(dividers.length).toBeGreaterThan(0)
     for (const r of dividers) expect(r.fg).toBe(TERM_PALETTE.dark.muted)
 
-    // the user's terminal: one row, context and cost included
+    const at107 = termLayout(FULL, 107, glyphs, false)
+    expect(at107).toMatchObject({ step: 3, width: 106, wrap: false, spacer: true })
+    expect(ids(at107)).toEqual(['5h', '7d', 'in', 'out', 'warm', 'ctx', 'cost'])
+
+    const at100 = termLayout(FULL, 100, glyphs, false)
+    expect(at100).toMatchObject({ step: 4, width: 98, wrap: false, spacer: true })
+    expect(ids(at100)).toEqual(['5h', '7d', 'in', 'out', 'warm', 'ctx', 'cost'])
+
+    // the user's terminal: the token up/down pills hide, the rest of the row stays on one line
     const at86 = termLayout(FULL, 86, glyphs, false)
-    expect(at86).toMatchObject({ step: 4, width: 86, wrap: false, spacer: false })
-    expect(ids(at86)).toEqual(['5h', '7d', 'in', 'out', 'ctx', 'cost'])
+    expect(at86).toMatchObject({ step: 5, width: 79, wrap: false, spacer: true })
+    expect(ids(at86)).toEqual(['5h', '7d', 'warm', 'ctx', 'cost'])
     expect(body(at86)).toContain('2h40m')
     expect(body(at86)).toContain('1d7h')
+    expect(body(at86)).toContain('60m')
     expect(body(at86)).toContain('210k')
     expect(body(at86)).not.toContain('▏')
 
     const at60 = termLayout(FULL, 60, glyphs, false)
-    expect(at60).toMatchObject({ step: 5, wrap: true, spacer: false })
-    expect(ids(at60)).toEqual(['5h', '7d', 'in', 'out', 'cache', 'ctx', 'cost'])
+    expect(at60).toMatchObject({ step: 6, wrap: true, spacer: false })
+    expect(ids(at60)).toEqual(['5h', '7d', 'in', 'out', 'cache', 'warm', 'ctx', 'cost'])
   }
 })
 
@@ -358,10 +481,11 @@ test('bar cells are spaces on the fill or track background, the tick the one gly
       const pal = TERM_PALETTE[light ? 'light' : 'dark']
       for (const step of [1, 2, 3, 4]) {
         for (const p of FULL) {
-          if (p.id !== '5h' && p.id !== '7d' && p.id !== 'ctx') continue
-          const fill = p.id === 'ctx' ? pal.ctx[ctxLevel(p.percent)].fg : pal.fill
+          if (p.id !== '5h' && p.id !== '7d' && p.id !== 'ctx' && p.id !== 'warm') continue
+          const fill = p.id === 'ctx' ? pal.ctx[ctxLevel(p.percent)].fg : p.id === 'warm' ? pal.ctx[warmLevel(p.remaining)].fg : pal.fill
           const bar = termPill(p, glyphs, light, step).filter(r => r.bg === fill || r.bg === pal.track)
-          expect(cells(bar)).toBe(p.id === 'ctx' ? (step >= 3 ? 3 : 4) : step >= 3 ? 4 : 6)
+          const n = p.id === 'ctx' || p.id === 'warm' ? (step >= 3 ? 3 : 4) : step >= 3 ? 4 : 6
+          expect(cells(bar)).toBe(n)
           for (const r of bar) for (const c of [...r.s]) expect(c === '▎' || c === ' ').toBe(true)
         }
       }
@@ -390,7 +514,7 @@ test('context pill: tokens kept, percent computed from tokens/window when absent
   expect(pillsOf([], null, null, NOW, { tokens: 0, window: 0 })).toEqual([{ id: 'ctx', tokens: 0, percent: 0 }])
   expect(pillsOf([], null, null, NOW, { tokens: 206_000, window: 200_000 })).toEqual([{ id: 'ctx', tokens: 206_000, percent: 100 }])
   expect(pillsOf([], null, null, NOW, null).map(p => p.id)).toEqual([])
-  expect(FULL.map(p => p.id)).toEqual(['5h', '7d', 'in', 'out', 'cache', 'ctx', 'cost'])
+  expect(FULL.map(p => p.id)).toEqual(['5h', '7d', 'in', 'out', 'cache', 'warm', 'ctx', 'cost'])
   expect(alt(pillsOf([], null, null, NOW, { tokens: 210_400, window: 1_000_000 })[0]!)).toBe('context 210k tokens (21% of window)')
 })
 
@@ -449,9 +573,9 @@ test('context pill follows session.measure only when context changed', async ($,
 
 test('token pills carry an icon and a figure, never a label', () => {
   for (const glyphs of ['nerd', 'unicode'] as const) {
-    const row = termLayout(FULL, 120, glyphs, false)
+    const row = termLayout(FULL, 124, glyphs, false)
     expect(row.wrap).toBe(false)
-    expect(row.pills.map(p => p.id)).toEqual(['5h', '7d', 'in', 'out', 'cache', 'ctx', 'cost'])
+    expect(row.pills.map(p => p.id)).toEqual(['5h', '7d', 'in', 'out', 'cache', 'warm', 'ctx', 'cost'])
     for (const id of ['in', 'out', 'cache'] as const) {
       const body = row.pills.find(p => p.id === id)!.runs.map(r => r.s).join('')
       expect(body).not.toContain('in')
@@ -474,10 +598,13 @@ test('a light theme gets the light palette', async ($, on) => {
 test('unicode glyphs when the option says so', { options: { glyphs: 'unicode' } }, async ($, on) => {
   engine(on, LIMITS, 4.32)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await respond($, 't1', 0, usageOf(3000, 3000, 954_200, 12_600))
   const term = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', ...BAND })
   const text = (await term.findAll({ type: 'Text' })).map(t => t.text).join('')
   expect(text).toContain('$4.32')
   expect(text).toContain('▐')
+  expect(text).toContain('◶')
+  expect(text).toContain('60m')
   expect([...text].some(c => c.codePointAt(0)! >= 0xe000 && c.codePointAt(0)! <= 0xf8ff)).toBe(false)
   expect([...text].some(c => c.codePointAt(0)! > 0xffff)).toBe(false)
 })
