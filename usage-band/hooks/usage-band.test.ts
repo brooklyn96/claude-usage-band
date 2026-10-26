@@ -928,3 +928,119 @@ for (const [name, env, files, path] of PATHS) {
     expect(reads[0]!.replaceAll('\\', '/').replace(/^[A-Za-z]:/, '')).toMatch(path)
   })
 }
+
+// Claude Code rewrites its cached usage reading only when /usage is opened: the mod runs `claude -p /usage` itself.
+const RENEWED = { value: { exitCode: 0, stdout: '', stderr: '' } }
+/** Stubs `process.run`; `calls` collects each argv and init, `answer` (given the call's number) the reply. */
+function usageRuns(on: On, answer: (n: number) => unknown = () => RENEWED) {
+  const calls: { argv: readonly string[]; init: unknown }[] = []
+  on('process.run', async (_, e) => {
+    calls.push({ argv: e.argv, init: e.init })
+    return (await answer(calls.length)) as typeof RENEWED
+  })
+  return calls
+}
+const start = { cwd: '/', surface: 'desktop', isInteractive: true } as const
+const measureTeam = ($: Engine) => $.session.measure({ context: { window: 200_000 }, rateLimits: TEAM, changed: [] })
+const MIN = 60_000
+
+test('Team: a reading over 20 minutes old is renewed with `claude -p /usage` and read again at once', async ($, on) => {
+  const clock = engine(on, TEAM)
+  let renewed = false
+  const reads = cacheFile(on, () => cacheAt(renewed ? NOW : NOW - 2 * H, SESSION_LIMIT, fableEntry()))
+  const calls = usageRuns(on, () => ((renewed = true), RENEWED))
+  await $.session.start(start)
+  await clock.settle()
+  expect(calls).toEqual([{ argv: ['claude', '-p', '/usage', '--no-session-persistence', '--strict-mcp-config', '--settings', '{"disableAllHooks":true}'], init: { env: { USAGE_BAND_RENEW: '1' }, timeoutMs: 30_000 } }])
+  expect(reads).toHaveLength(2) // before the ask, and straight after it, not at the next minute
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
+  expect(await alts(ui)).toEqual(['5-hour limit 80% left, resets in 2h 40m', 'Fable 7-day limit 98% left, resets in 4d 0h'])
+})
+
+test('Team: a cache file that cannot be read is not renewed: nothing says it is stale', async ($, on) => {
+  const clock = engine(on, TEAM)
+  cacheFile(on, null)
+  const calls = usageRuns(on)
+  await $.session.start(start)
+  await clock.advance(MIN)
+  await clock.settle()
+  expect(calls).toHaveLength(0)
+})
+
+test('Team: a reading of 20 minutes or less is not renewed', async ($, on) => {
+  const clock = engine(on, TEAM)
+  cacheFile(on, cacheAt(NOW - 20 * MIN, SESSION_LIMIT, fableEntry()))
+  const calls = usageRuns(on)
+  await $.session.start(start)
+  await clock.settle()
+  expect(calls).toHaveLength(0)
+})
+
+test('Team: a file with no live Fable entry is renewed', async ($, on) => {
+  const clock = engine(on, TEAM)
+  cacheFile(on, cacheOf(SESSION_LIMIT))
+  const calls = usageRuns(on)
+  await $.session.start(start)
+  await clock.settle()
+  expect(calls).toHaveLength(1)
+})
+
+test('at most one renewal in 20 minutes, and never two at once', async ($, on) => {
+  const clock = engine(on, TEAM)
+  cacheFile(on, cacheAt(NOW - 2 * H, SESSION_LIMIT, fableEntry())) // the ask changes nothing: still stale
+  const calls = usageRuns(on, async () => {
+    await clock.sleep(5 * MIN) // an ask that takes long
+    return RENEWED
+  })
+  await $.session.start(start)
+  await clock.advance(MIN) // looks again, one ask still running
+  await measureTeam($)
+  expect(calls).toHaveLength(1)
+  for (let i = 0; i < 18; i++) await clock.advance(MIN) // 19 minutes in, the ask long over
+  await measureTeam($)
+  expect(calls).toHaveLength(1)
+  await clock.advance(MIN) // 20 minutes after the first
+  await measureTeam($)
+  await clock.settle()
+  expect(calls).toHaveLength(2)
+})
+
+test('a failed renewal keeps the last value and waits 20 minutes', async ($, on) => {
+  const clock = engine(on, TEAM)
+  cacheFile(on, cacheAt(NOW - 2 * H, SESSION_LIMIT, fableEntry()))
+  const failures: unknown[] = [{ deny: 'ENOENT' }, { value: { exitCode: 1, stdout: '', stderr: 'no' } }, { deny: 'timed out' }]
+  const calls = usageRuns(on, n => failures[n - 1])
+  await $.session.start(start)
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
+  await clock.settle()
+  expect(calls).toHaveLength(1)
+  for (let i = 0; i < 19; i++) await clock.advance(MIN)
+  expect(calls).toHaveLength(1)
+  expect((await alts(ui))[1]).toMatch(/^Fable 7-day limit 98% left.* — reading from /) // the old value stays, dimmed
+  await clock.advance(MIN)
+  expect(calls).toHaveLength(2) // exit code 1, then the same wait
+  for (let i = 0; i < 20; i++) await clock.advance(MIN)
+  expect(calls).toHaveLength(3)
+})
+
+test('Max: no renewal, no file read', async ($, on) => {
+  const clock = engine(on, LIMITS)
+  const reads = cacheFile(on, cacheAt(NOW - 2 * H, fableEntry()))
+  const calls = usageRuns(on)
+  await $.session.start(start)
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: LIMITS, changed: [] })
+  await clock.advance(30 * MIN)
+  await clock.settle()
+  expect(calls).toHaveLength(0)
+  expect(reads).toEqual([])
+  expect(reads.calls).toEqual({ env: 0, stat: 0 })
+})
+
+test('the copy of Claude Code a renewal starts does not start another', async ($, on) => {
+  const clock = engine(on, TEAM)
+  cacheFile(on, cacheAt(NOW - 2 * H, SESSION_LIMIT, fableEntry()), { USERPROFILE: '/home/u/', USAGE_BAND_RENEW: '1' })
+  const calls = usageRuns(on)
+  await $.session.start(start)
+  await clock.settle()
+  expect(calls).toHaveLength(0)
+})

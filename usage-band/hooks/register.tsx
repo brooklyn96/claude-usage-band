@@ -18,13 +18,67 @@ const fableAtom = atom({ plugin: 'usage-band', key: 'fable' } as const, null)
 
 // When Claude Code's cached usage reading was last looked at.
 let fableAt = -Infinity
+// A reading older than this, or none, is asked for anew; so is a failed ask, once that long has passed.
+const RENEW_MS = 20 * 60_000
+// When Claude Code was last asked for a new reading, and whether that ask is still running.
+let renewAt = -Infinity
+let renewing = false
 
 /**
- * A plan with no `seven_day` window (Team) still has the Fable weekly one in the usage reply Claude Code
- * caches in its global config file, which no mod event carries. Looked at once a minute at most, and only
- * for such a plan. The file is found as Claude Code finds it (legacy file in the config home, ~/.claude;
- * main file in the home); one that cannot be read or parsed (it is
- * rewritten often) keeps the last value, and only a file that parses without a live entry clears it.
+ * The Fable weekly window in the usage reply Claude Code caches in its global config file, which no mod
+ * event carries. The file is found as Claude Code finds it (legacy file in the config home, ~/.claude;
+ * main file in the home). `undefined` when it cannot be read or parsed (it is rewritten often); `null`
+ * when it parses without a live entry.
+ */
+async function cached($: EngineInterface, now: number): Promise<Limit | null | undefined> {
+  try {
+    // Claude Code's own home: `os.homedir()`, which is USERPROFILE on Windows and HOME elsewhere.
+    const windows = (await $.env.get('OS')) === 'Windows_NT'
+    const home = windows ? (await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) : (await $.env.get('HOME')) || (await $.env.get('USERPROFILE'))
+    // Claude Code 2.1.310 V_(): `<CLAUDE_CONFIG_DIR ?? ~/.claude>/.config.json` when it is a non-empty file, else `<CLAUDE_CONFIG_DIR || ~>/.claude[-custom-oauth].json`.
+    const trim = (p: string | undefined) => (p ?? '').replace(/[\\/]+$/, '')
+    const base = trim(await $.env.get('CLAUDE_CONFIG_DIR'))
+    const homeDir = trim(home)
+    if (!base && !homeDir) return undefined
+    const legacy = `${base || `${homeDir}/.claude`}/.config.json`
+    const stat = await $.fs.stat(legacy).catch(() => null) // rejects when missing: the usual case
+    const file = stat?.kind === 'file' && stat.size > 0 ? legacy : `${base || homeDir}/.claude${(await $.env.get('CLAUDE_CODE_CUSTOM_OAUTH_URL')) ? '-custom-oauth' : ''}.json`
+    return fableLimit(JSON.parse(await $.fs.read(file)), now)
+  } catch {
+    return undefined
+  }
+}
+
+const RENEW_ARGV = ['claude', '-p', '/usage', '--no-session-persistence', '--strict-mcp-config', '--settings', '{"disableAllHooks":true}']
+
+/**
+ * Claude Code rewrites that reading only when /usage is opened, so `claude -p /usage` (no model call, no
+ * window) is run to do it: at most once in RENEW_MS and never twice at once, a failure of any kind keeping
+ * the last value until the next try. The copy it starts loads this mod too, and the variable stops it
+ * from starting another. The extra flags keep that copy from saving a session file, starting MCP servers
+ * or running hooks every time.
+ */
+async function renew($: EngineInterface, now: number) {
+  if (renewing || now - renewAt < RENEW_MS) return
+  renewing = true
+  renewAt = now
+  try {
+    if (await $.env.get('USAGE_BAND_RENEW')) return
+    const { exitCode } = await $.process.run(RENEW_ARGV, { env: { USAGE_BAND_RENEW: '1' }, timeoutMs: 30_000 })
+    if (exitCode !== 0) return
+    const limit = await cached($, await $.clock.now())
+    if (limit !== undefined) await update($, fableAtom, () => limit)
+  } catch {
+    // Could not start, timed out, or refused: the pill keeps what it has.
+  } finally {
+    renewing = false
+  }
+}
+
+/**
+ * A plan with no `seven_day` window (Team) still has the Fable weekly one in the cached usage reading.
+ * Looked at once a minute at most, and only for such a plan; one that cannot be read keeps the last value,
+ * and only a file that parses without a live entry clears it. A missing or stale reading is renewed.
  */
 async function fable($: EngineInterface, rateLimits: readonly SessionRateLimit[]) {
   if (rateLimits.some(l => l.kind === 'seven_day')) return update($, fableAtom, () => null)
@@ -36,24 +90,11 @@ async function fable($: EngineInterface, rateLimits: readonly SessionRateLimit[]
   const now = await $.clock.now()
   if (now - fableAt < 60_000) return
   fableAt = now
-  let limit: Limit | null
-  try {
-    // Claude Code's own home: `os.homedir()`, which is USERPROFILE on Windows and HOME elsewhere.
-    const windows = (await $.env.get('OS')) === 'Windows_NT'
-    const home = windows ? (await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) : (await $.env.get('HOME')) || (await $.env.get('USERPROFILE'))
-    // Claude Code 2.1.310 V_(): `<CLAUDE_CONFIG_DIR ?? ~/.claude>/.config.json` when it is a non-empty file, else `<CLAUDE_CONFIG_DIR || ~>/.claude[-custom-oauth].json`.
-    const trim = (p: string | undefined) => (p ?? '').replace(/[\\/]+$/, '')
-    const base = trim(await $.env.get('CLAUDE_CONFIG_DIR'))
-    const homeDir = trim(home)
-    if (!base && !homeDir) return
-    const legacy = `${base || `${homeDir}/.claude`}/.config.json`
-    const stat = await $.fs.stat(legacy).catch(() => null) // rejects when missing: the usual case
-    const file = stat?.kind === 'file' && stat.size > 0 ? legacy : `${base || homeDir}/.claude${(await $.env.get('CLAUDE_CODE_CUSTOM_OAUTH_URL')) ? '-custom-oauth' : ''}.json`
-    limit = fableLimit(JSON.parse(await $.fs.read(file)), now)
-  } catch {
-    return // Unreadable or torn: keep what is drawn until the next look.
-  }
+  const limit = await cached($, now)
+  if (limit === undefined) return // Unreadable or torn: keep what is drawn until the next look.
   await update($, fableAtom, () => limit)
+  // Not awaited: the ask can take 30 s, which no hook or timer should wait for.
+  if (!limit?.fetchedAtMs || now - limit.fetchedAtMs > RENEW_MS) void renew($, now)
 }
 
 /** `context` only when its fill moved (or on a full reading); `tokens` is absent before the first response. */
