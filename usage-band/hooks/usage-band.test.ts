@@ -694,7 +694,7 @@ test('Team: the Fable weekly pill takes the 7d pill place, from the cached usage
   expect(await alts(ui)).toEqual(['5-hour limit 80% left, resets in 2h 40m', 'Fable 7-day limit 98% left, resets in 4d 0h'])
   const [, fable] = await ui.findAll({ type: 'Svg' })
   const source = String(fable!.props.source)
-  expect(source).toContain('>F<') // the Svg pill is no wider than 7d's
+  expect(source).toContain('>Fable<') // the full label, beside the sparkle
   expect(source).toContain('fill="#333333"') // the time tick
   expect(source).toContain(COLORS['7d'].bg)
 
@@ -705,7 +705,7 @@ test('Team: the Fable weekly pill takes the 7d pill place, from the cached usage
   const term = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', ...BAND })
   const text = (await term.findAll({ type: 'Text' })).map(t => t.text).join('')
   for (const figure of ['5h', 'Fable', '98%', '4d 0h']) expect(text).toContain(figure)
-  expect(text).toContain('\u{f14f7}')
+  expect(text).toContain('\u{f0ae2}')
   expect(text).not.toContain('7d')
   const pill = await term.find({ key: 'fable' })
   expect((pill!.children as { props?: { backgroundColor?: string } }[]).map(c => c.props?.backgroundColor)).toContain(TERM_PALETTE.dark.pill['7d'].bg)
@@ -717,7 +717,7 @@ test('Team with unicode glyphs: Fable has its own plain glyph', { options: { gly
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const term = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', ...BAND })
   const text = (await term.findAll({ type: 'Text' })).map(t => t.text).join('')
-  expect(text).toContain('◧')
+  expect(text).toContain('*')
   expect(text).toContain('Fable')
   expect([...text].some(c => c.codePointAt(0)! > 0xffff)).toBe(false)
 })
@@ -813,14 +813,29 @@ test("Team's 86-column terminal keeps 5h, Fable, cache warm, context and cost on
   expect(await term.drawn()).toMatchObject({ type: 'Box', props: { flexWrap: 'nowrap' } })
   for (const id of ['5h', 'fable', 'warm', 'ctx', 'cost'] as const) expect(await term.find({ key: id })).toBeDefined()
   const text = (await term.findAll({ type: 'Text' })).map(t => t.text).join('')
-  // compact step: Fable is a single F beside its glyph
-  for (const figure of ['5h', '\u{f14f7} F ', '98%', '4d0h', '60m', '210k', '$4.32']) expect(text).toContain(figure)
+  // compact step: the sparkle alone, no label
+  for (const figure of ['5h', '\u{f0ae2} ', '98%', '4d0h', '60m', '210k', '$4.32']) expect(text).toContain(figure)
+  expect(text).not.toContain('Fable')
+  expect(text).not.toContain('F ')
 })
 
-test('Fable in the 7d slot: the Svg pill is no wider than the 7d one', () => {
+test('Fable: a sparkle and "Fable" where there is room, the sparkle alone at compact terminal steps', () => {
   const limit: Limit = { kind: 'fable', percentUsed: 2, resetsAt: iso(NOW + 4 * 24 * H), fetchedAtMs: NOW }
-  const week = (l: Limit[], f: Limit | null) => pillSvg(pillsOf(l, null, null, NOW, null, null, f)[1]!).width
-  expect(week(TEAM, limit)).toBeLessThanOrEqual(week(LIMITS, null))
+  const pills = pillsOf(TEAM, null, null, NOW, null, null, limit)
+  const svg = pillSvg(pills[1]!).source
+  expect(svg).toContain('>Fable<')
+  expect(svg).not.toContain('>F<')
+  expect(svg).toContain('<path d="M9.937 15.5') // the sparkle icon
+  for (const [glyphs, sparkle] of [['nerd', '\u{f0ae2}'], ['unicode', '*']] as const) {
+    const wide = termLayout(pills, 200, glyphs, false)
+    expect(wide.step).toBe(1)
+    expect(wide.pills.find(p => p.id === 'fable')!.runs.map(r => r.s).join('')).toContain(`${sparkle} Fable `)
+    for (let step = 3; step <= 5; step++) {
+      const text = termPill(pills[1]!, glyphs, false, step).map(r => r.s).join('')
+      expect(text).toContain(`${sparkle} `)
+      expect(text).not.toContain('F')
+    }
+  }
 })
 
 test('worst-case figures fit one line at 86 columns on Team and Max, nerd and unicode; Fable is never wider than 7d at compact steps', () => {

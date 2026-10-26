@@ -14,7 +14,7 @@ Preview renders:
 | --- | --- |
 | 5h | Percent of the 5-hour quota left. The bar is the quota left, the tick is the time left in the window; shows the time until reset. |
 | 7d | Same for the 7-day quota. |
-| Fable | On a Team plan, which has no all-model 7-day quota, the Fable 7-day quota takes the 7d pill's place. It is Claude Code's saved reading from its own config file, which the band refreshes automatically about every 20 minutes by running `claude -p /usage` in the background (no model call, no window; `claude` must be on your PATH). If that fails, the last reading stays and is drawn dimmed once it is more than an hour old (the pill's alt text says how old), and it is hidden once its week has ended. The desktop and VS Code pill, and narrow terminal rows, show it as a single F. |
+| Fable | On a Team plan, which has no all-model 7-day quota, the Fable 7-day quota takes the 7d pill's place. It is Claude Code's saved reading from its own config file, which the band refreshes automatically about every 20 minutes by running `claude -p /usage` in the background (no model call, no window; `claude` must be on your PATH). If that fails, the last reading stays and is drawn dimmed once it is more than an hour old (the pill's alt text says how old), and it is hidden once its week has ended. It shows as a sparkle with the label Fable; narrow terminal rows show the sparkle alone. |
 | Tokens up | Input tokens plus cache writes. |
 | Tokens down | Output tokens. |
 | Cache reads | Tokens read from the prompt cache. |

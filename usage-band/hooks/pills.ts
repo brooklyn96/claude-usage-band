@@ -148,8 +148,6 @@ export const CTX_COLORS = {
 } as const
 
 const RATE_LABEL = { '5h': '5h', '7d': '7d', fable: 'Fable' } as const
-// Where room is tight (Svg, compact terminal steps) Fable is a single F beside its glyph, never wider than `7d`.
-const SHORT_FABLE = 'F'
 
 export const alt = (p: Pill): string => {
   if (isRate(p)) {
@@ -168,9 +166,9 @@ const ICONS = {
   calendar:
     '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>' +
     '<text x="12" y="19.6" font-size="10" font-weight="700" text-anchor="middle" stroke="none" fill="currentColor">7</text>',
-  // Lucide book-open
-  book:
-    '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>',
+  // Lucide sparkle
+  sparkle:
+    '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/>',
   history: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
   in: '<path d="M12 3v11M7 8l5-5 5 5"/><rect x="3" y="15" width="18" height="6" rx="2"/>',
   out: '<path d="M12 2v11M7 8l5 5 5-5"/><rect x="3" y="15" width="18" height="6" rx="2"/>',
@@ -213,9 +211,9 @@ export const pillSvg = (p: Pill): { source: string; width: number } => {
   const parts: string[] = []
   let x = 9
   if (isRate(p)) {
-    parts.push(icon({ '5h': 'gauge', '7d': 'calendar', fable: 'book' }[p.id], x, ICON, fg))
+    parts.push(icon({ '5h': 'gauge', '7d': 'calendar', fable: 'sparkle' }[p.id], x, ICON, fg))
     x += ICON + 7
-    const label = p.id === 'fable' ? SHORT_FABLE : RATE_LABEL[p.id]
+    const label = RATE_LABEL[p.id]
     parts.push(text(label, x, MUTED))
     x += label.length * CHAR + 8
     const fill = (BAR * Math.min(100, Math.max(0, p.percent))) / 100
@@ -287,7 +285,7 @@ const GLYPHS = {
     caps: ['', ''],
     '5h': '\u{f029a}', // md-gauge
     '7d': '\u{f00ed}', // md-calendar
-    fable: '\u{f14f7}', // md-book_open_variant
+    fable: '\u{f0ae2}', // md-star_four_points
     left: '\u{f02da}', // md-history
     in: '\u{f011d}', // md-tray_arrow_up
     out: '\u{f0120}', // md-tray_arrow_down
@@ -296,8 +294,8 @@ const GLYPHS = {
     ctx: '\u{f09d1}', // md-brain
     warm: '\u{f051f}', // md-timer_sand
   },
-  // Only glyphs Cascadia Mono has, all single width.
-  unicode: { caps: ['▐', '▌'], '5h': '◔', '7d': '▤', fable: '◧', left: '◷', in: '↑', out: '↓', cache: '≡', cost: '◉', ctx: '◐', warm: '◶' },
+  // Glyphs Cascadia Mono has, all single width.
+  unicode: { caps: ['▐', '▌'], '5h': '◔', '7d': '▤', fable: '*', left: '◷', in: '↑', out: '↓', cache: '≡', cost: '◉', ctx: '◐', warm: '◶' },
 } as const
 
 const WEEK_DARK = { bg: '#2d2850', fg: '#a892ff' }
@@ -331,7 +329,7 @@ export const cells = (runs: Run[]): number => runs.reduce((n, r) => n + [...r.s]
 
 /**
  * One pill as runs, caps included, at ladder `step` (see termLayout): from step 3
- * the bars are shorter (and Fable's label a single F), from step 4 the time labels compact (`2h40m`, no divider).
+ * the bars are shorter (and Fable is its sparkle alone, no label), from step 4 the time labels compact (`2h40m`, no divider).
  */
 export const termPill = (p: Pill, glyphs: Glyphs, light: boolean, step = 1): Run[] => {
   const g = GLYPHS[glyphs]
@@ -358,7 +356,7 @@ export const termPill = (p: Pill, glyphs: Glyphs, light: boolean, step = 1): Run
   if (isRate(p)) {
     const n = step >= 3 ? 4 : 6
     put(`${g[p.id]} `, fg)
-    put(`${p.id === 'fable' && step >= 3 ? SHORT_FABLE : RATE_LABEL[p.id]} `, pal.muted)
+    if (p.id !== 'fable' || step < 3) put(`${RATE_LABEL[p.id]} `, pal.muted)
     bar(p.percent, n, pal.fill, p.timeShare === null ? -1 : Math.min(n - 1, Math.floor(p.timeShare * n)))
     put(' ', fg)
     put(`${p.percent}%`, pal.text, { bold: true })
