@@ -3,10 +3,12 @@ import type { ContextUsage, Limit, Tokens } from '../types'
 const MIN = 60_000
 const HOUR = 60 * MIN
 const DAY = 24 * HOUR
-const WINDOWS = { five_hour: 5 * HOUR, seven_day: 7 * DAY } as const
+/** A cached reading older than this is drawn dimmed. */
+const STALE = HOUR
+const WINDOWS = { five_hour: 5 * HOUR, seven_day: 7 * DAY, fable: 7 * DAY } as const
 
-/** `percent` is the quota remaining, `timeShare` the share of the window's time remaining. */
-export type RatePill = { id: '5h' | '7d'; percent: number; timeShare: number | null; left: string }
+/** `percent` is the quota remaining, `timeShare` the share of the window's time remaining; `age` is set (`2h`, `unknown`) on a cached reading older than STALE, which draws dimmed. */
+export type RatePill = { id: '5h' | '7d' | 'fable'; percent: number; timeShare: number | null; left: string; age?: string }
 export type ValuePill = { id: 'in' | 'out' | 'cache' | 'cost'; value: string }
 /** `tokens` is the last response's input side; `percent` is the context window USED (what auto-compact reacts to), unlike the quota pills. */
 export type ContextPill = { id: 'ctx'; tokens: number; percent: number }
@@ -54,13 +56,45 @@ export const remainingFraction = (limit: Limit, now: number): number | null => {
   return Math.min(1, Math.max(0, (resets - now) / window))
 }
 
-export const pillsOf = (limits: Limit[], tokens: Tokens | null, cost: number | null, now: number, context: ContextUsage | null = null, warm: WarmReading | null = null): Pill[] => {
+/** The Fable weekly window from Claude Code's cached usage reading (with when it was read), as a `fable` limit; null when it has no live entry. */
+export const fableLimit = (cached: unknown, now: number): Limit | null => {
+  const limits = (cached as { cachedUsageUtilization?: { utilization?: { limits?: unknown } } } | null)?.cachedUsageUtilization?.utilization?.limits
+  if (!Array.isArray(limits)) return null
+  const entry = limits.find(
+    (l: { group?: unknown; kind?: unknown; scope?: { model?: { display_name?: unknown } } } | null) =>
+      l?.group === 'weekly' && l.kind === 'weekly_scoped' && String(l.scope?.model?.display_name).toLowerCase().includes('fable'),
+  ) as { percent?: unknown; resets_at?: unknown } | undefined
+  const resets = typeof entry?.resets_at === 'string' ? Date.parse(entry.resets_at) : NaN
+  const percent = entry?.percent
+  // A reset already past means the cached figure is of a window that is over.
+  if (typeof percent !== 'number' || !Number.isFinite(percent) || Number.isNaN(resets) || resets <= now) return null
+  const fetchedAtMs = (cached as { cachedUsageUtilization: { fetchedAtMs?: unknown } }).cachedUsageUtilization.fetchedAtMs
+  return {
+    kind: 'fable',
+    percentUsed: percent,
+    resetsAt: new Date(resets).toISOString(),
+    ...(typeof fetchedAtMs === 'number' && Number.isFinite(fetchedAtMs) ? { fetchedAtMs } : {}),
+  }
+}
+
+/** The reading's age as `45m`, `2h` or `3d`. */
+const formatAge = (ms: number): string => (ms >= DAY ? `${Math.floor(ms / DAY)}d` : ms >= HOUR ? `${Math.floor(ms / HOUR)}h` : `${Math.floor(ms / MIN)}m`)
+
+/** `fable` stands in for the 7d pill when the plan has no all-model weekly window (Team). */
+export const pillsOf = (limits: Limit[], tokens: Tokens | null, cost: number | null, now: number, context: ContextUsage | null = null, warm: WarmReading | null = null, fable: Limit | null = null): Pill[] => {
   const pills: Pill[] = []
-  for (const [kind, id] of [['five_hour', '5h'], ['seven_day', '7d']] as const) {
-    const limit = limits.find(l => l.kind === kind)
+  const seven = limits.find(l => l.kind === 'seven_day')
+  // A Fable window already over (the file could not be read again) is no pill, nor is Fable alone with no live limits.
+  const week = limits.length > 0 && fable && Date.parse(fable.resetsAt ?? '') > now ? fable : null
+  for (const [limit, id] of [[limits.find(l => l.kind === 'five_hour'), '5h'], [seven ?? week, seven ? '7d' : 'fable']] as const) {
     if (!limit) continue
     const left = limit.resetsAt === undefined ? '' : formatLeft(Date.parse(limit.resetsAt) - now)
-    pills.push({ id, percent: Math.max(0, Math.round(100 - limit.percentUsed)), timeShare: remainingFraction(limit, now), left })
+    const pill: RatePill = { id, percent: Math.max(0, Math.round(100 - limit.percentUsed)), timeShare: remainingFraction(limit, now), left }
+    if (id === 'fable') {
+      const age = limit.fetchedAtMs === undefined ? Infinity : now - limit.fetchedAtMs
+      if (age > STALE) pill.age = Number.isFinite(age) ? formatAge(age) : 'unknown'
+    }
+    pills.push(pill)
   }
   if (tokens) {
     pills.push({ id: 'in', value: formatTokens(tokens.input) })
@@ -79,7 +113,7 @@ export const pillsOf = (limits: Limit[], tokens: Tokens | null, cost: number | n
   return pills
 }
 
-export const isRate = (p: Pill): p is RatePill => p.id === '5h' || p.id === '7d'
+export const isRate = (p: Pill): p is RatePill => p.id === '5h' || p.id === '7d' || p.id === 'fable'
 
 /** Context fill step: below 60% calm, 60-85% amber, above 85% red. */
 export const ctxLevel = (percent: number) => (percent > 85 ? 'high' : percent >= 60 ? 'warn' : 'ok')
@@ -95,9 +129,11 @@ const TICK = '#333333'
 const DIVIDER = '#b9c2c0'
 
 // Colours sampled from the reference (light theme).
+const WEEK = { bg: '#e4e0f3', fg: '#7b5fd3' }
 export const COLORS = {
   '5h': { bg: '#dce8e4', fg: '#3d8c7d' },
-  '7d': { bg: '#e4e0f3', fg: '#7b5fd3' },
+  '7d': WEEK,
+  fable: WEEK,
   in: { bg: '#f4ddd9', fg: '#d0553f' },
   out: { bg: '#dde9dc', fg: '#4c9a50' },
   cache: { bg: '#dfe2f7', fg: '#4a5bd6' },
@@ -111,10 +147,15 @@ export const CTX_COLORS = {
   cold: { bg: '#a9b0ac', fg: MUTED },
 } as const
 
+const RATE_LABEL = { '5h': '5h', '7d': '7d', fable: 'Fable' } as const
+// Where room is tight (Svg, compact terminal steps) Fable is a single F beside its glyph, never wider than `7d`.
+const SHORT_FABLE = 'F'
+
 export const alt = (p: Pill): string => {
   if (isRate(p)) {
-    const name = p.id === '5h' ? '5-hour' : '7-day'
-    return `${name} limit ${p.percent}% left${p.left ? `, resets in ${p.left}` : ''}`
+    const name = { '5h': '5-hour', '7d': '7-day', fable: 'Fable 7-day' }[p.id]
+    const reading = p.age === undefined ? '' : p.age === 'unknown' ? ' — reading of unknown age' : ` — reading from ${p.age} ago`
+    return `${name} limit ${p.percent}% left${p.left ? `, resets in ${p.left}` : ''}${reading}`
   }
   if (p.id === 'ctx') return `context ${formatCtxTokens(p.tokens)} tokens (${p.percent}% of window)`
   if (p.id === 'warm') return p.label === 'cold' ? 'Prompt cache cold' : `Prompt cache warm for ${p.label}`
@@ -127,6 +168,9 @@ const ICONS = {
   calendar:
     '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>' +
     '<text x="12" y="19.6" font-size="10" font-weight="700" text-anchor="middle" stroke="none" fill="currentColor">7</text>',
+  // Lucide book-open
+  book:
+    '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>',
   history: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
   in: '<path d="M12 3v11M7 8l5-5 5 5"/><rect x="3" y="15" width="18" height="6" rx="2"/>',
   out: '<path d="M12 2v11M7 8l5 5 5-5"/><rect x="3" y="15" width="18" height="6" rx="2"/>',
@@ -164,14 +208,16 @@ const text = (s: string, x: number, color: string, bold = false) =>
 
 /** One pill as an SVG document and its width in CSS pixels. */
 export const pillSvg = (p: Pill): { source: string; width: number } => {
-  const { bg, fg } = p.id === 'ctx' ? CTX_COLORS[ctxLevel(p.percent)] : p.id === 'warm' ? CTX_COLORS[warmLevel(p.remaining)] : COLORS[p.id]
+  const { bg, fg } =
+    p.id === 'ctx' ? CTX_COLORS[ctxLevel(p.percent)] : p.id === 'warm' ? CTX_COLORS[warmLevel(p.remaining)] : isRate(p) && p.age !== undefined ? CTX_COLORS.cold : COLORS[p.id]
   const parts: string[] = []
   let x = 9
   if (isRate(p)) {
-    parts.push(icon(p.id === '5h' ? 'gauge' : 'calendar', x, ICON, fg))
+    parts.push(icon({ '5h': 'gauge', '7d': 'calendar', fable: 'book' }[p.id], x, ICON, fg))
     x += ICON + 7
-    parts.push(text(p.id, x, MUTED))
-    x += 2 * CHAR + 8
+    const label = p.id === 'fable' ? SHORT_FABLE : RATE_LABEL[p.id]
+    parts.push(text(label, x, MUTED))
+    x += label.length * CHAR + 8
     const fill = (BAR * Math.min(100, Math.max(0, p.percent))) / 100
     const y = (H - 4) / 2
     parts.push(
@@ -241,6 +287,7 @@ const GLYPHS = {
     caps: ['', ''],
     '5h': '\u{f029a}', // md-gauge
     '7d': '\u{f00ed}', // md-calendar
+    fable: '\u{f14f7}', // md-book_open_variant
     left: '\u{f02da}', // md-history
     in: '\u{f011d}', // md-tray_arrow_up
     out: '\u{f0120}', // md-tray_arrow_down
@@ -250,14 +297,16 @@ const GLYPHS = {
     warm: '\u{f051f}', // md-timer_sand
   },
   // Only glyphs Cascadia Mono has, all single width.
-  unicode: { caps: ['▐', '▌'], '5h': '◔', '7d': '▤', left: '◷', in: '↑', out: '↓', cache: '≡', cost: '◉', ctx: '◐', warm: '◶' },
+  unicode: { caps: ['▐', '▌'], '5h': '◔', '7d': '▤', fable: '◧', left: '◷', in: '↑', out: '↓', cache: '≡', cost: '◉', ctx: '◐', warm: '◶' },
 } as const
 
+const WEEK_DARK = { bg: '#2d2850', fg: '#a892ff' }
 export const TERM_PALETTE = {
   dark: {
     pill: {
       '5h': { bg: '#1d3b36', fg: '#5ed0b8' },
-      '7d': { bg: '#2d2850', fg: '#a892ff' },
+      '7d': WEEK_DARK,
+      fable: WEEK_DARK,
       in: { bg: '#47231e', fg: '#ff7e66' },
       out: { bg: '#1f3d23', fg: '#72d37c' },
       cache: { bg: '#242c55', fg: '#8796ff' },
@@ -282,12 +331,13 @@ export const cells = (runs: Run[]): number => runs.reduce((n, r) => n + [...r.s]
 
 /**
  * One pill as runs, caps included, at ladder `step` (see termLayout): from step 3
- * the bars are shorter, from step 4 the time labels compact (`2h40m`, no divider).
+ * the bars are shorter (and Fable's label a single F), from step 4 the time labels compact (`2h40m`, no divider).
  */
 export const termPill = (p: Pill, glyphs: Glyphs, light: boolean, step = 1): Run[] => {
   const g = GLYPHS[glyphs]
   const pal = TERM_PALETTE[light ? 'light' : 'dark']
-  const { bg, fg } = p.id === 'ctx' ? pal.ctx[ctxLevel(p.percent)] : p.id === 'warm' ? pal.ctx[warmLevel(p.remaining)] : pal.pill[p.id]
+  const { bg, fg } =
+    p.id === 'ctx' ? pal.ctx[ctxLevel(p.percent)] : p.id === 'warm' ? pal.ctx[warmLevel(p.remaining)] : isRate(p) && p.age !== undefined ? pal.ctx.cold : pal.pill[p.id]
   const runs: Run[] = []
   const put = (s: string, color: string, extra: Partial<Run> = {}) => {
     const run = { s, fg: color, bg, ...extra }
@@ -308,7 +358,7 @@ export const termPill = (p: Pill, glyphs: Glyphs, light: boolean, step = 1): Run
   if (isRate(p)) {
     const n = step >= 3 ? 4 : 6
     put(`${g[p.id]} `, fg)
-    put(`${p.id} `, pal.muted)
+    put(`${p.id === 'fable' && step >= 3 ? SHORT_FABLE : RATE_LABEL[p.id]} `, pal.muted)
     bar(p.percent, n, pal.fill, p.timeShare === null ? -1 : Math.min(n - 1, Math.floor(p.timeShare * n)))
     put(' ', fg)
     put(`${p.percent}%`, pal.text, { bold: true })

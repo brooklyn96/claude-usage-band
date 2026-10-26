@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ModelUsage, Register, SessionContextUsage, SessionCost, SessionRateLimit } from 'claude-code'
 
 import type { Limit, Tokens } from '../types'
-import { PILL_H, STRIP_BG, alt, isRate, pillSvg, pillsOf, termLayout } from './pills'
+import { PILL_H, STRIP_BG, alt, fableLimit, isRate, pillSvg, pillsOf, termLayout } from './pills'
 import type { Pill, ValuePill } from './pills'
 
 const limitsAtom = atom({ plugin: 'usage-band', key: 'limits' } as const, [])
@@ -13,12 +13,55 @@ const contextAtom = atom({ plugin: 'usage-band', key: 'context' } as const, null
 // When the main thread's last response landed: the prompt cache's warm countdown.
 const warmAtom = atom({ plugin: 'usage-band', key: 'cacheWarm' } as const, null)
 const nowAtom = atom({ plugin: 'usage-band', key: 'now' } as const, 0)
+// The Fable weekly window, which takes the 7d pill's place on a plan with no all-model weekly one.
+const fableAtom = atom({ plugin: 'usage-band', key: 'fable' } as const, null)
+
+// When Claude Code's cached usage reading was last looked at.
+let fableAt = -Infinity
+
+/**
+ * A plan with no `seven_day` window (Team) still has the Fable weekly one in the usage reply Claude Code
+ * caches in its global config file, which no mod event carries. Looked at once a minute at most, and only
+ * for such a plan. The file is found as Claude Code finds it (legacy file in the config home, ~/.claude;
+ * main file in the home); one that cannot be read or parsed (it is
+ * rewritten often) keeps the last value, and only a file that parses without a live entry clears it.
+ */
+async function fable($: EngineInterface, rateLimits: readonly SessionRateLimit[]) {
+  if (rateLimits.some(l => l.kind === 'seven_day')) return update($, fableAtom, () => null)
+  // No reading yet, or the windows were reset (a new login): nothing says which plan this is.
+  if (rateLimits.length === 0) {
+    fableAt = -Infinity
+    return update($, fableAtom, () => null)
+  }
+  const now = await $.clock.now()
+  if (now - fableAt < 60_000) return
+  fableAt = now
+  let limit: Limit | null
+  try {
+    // Claude Code's own home: `os.homedir()`, which is USERPROFILE on Windows and HOME elsewhere.
+    const windows = (await $.env.get('OS')) === 'Windows_NT'
+    const home = windows ? (await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) : (await $.env.get('HOME')) || (await $.env.get('USERPROFILE'))
+    // Claude Code 2.1.310 V_(): `<CLAUDE_CONFIG_DIR ?? ~/.claude>/.config.json` when it is a non-empty file, else `<CLAUDE_CONFIG_DIR || ~>/.claude[-custom-oauth].json`.
+    const trim = (p: string | undefined) => (p ?? '').replace(/[\\/]+$/, '')
+    const base = trim(await $.env.get('CLAUDE_CONFIG_DIR'))
+    const homeDir = trim(home)
+    if (!base && !homeDir) return
+    const legacy = `${base || `${homeDir}/.claude`}/.config.json`
+    const stat = await $.fs.stat(legacy).catch(() => null) // rejects when missing: the usual case
+    const file = stat?.kind === 'file' && stat.size > 0 ? legacy : `${base || homeDir}/.claude${(await $.env.get('CLAUDE_CODE_CUSTOM_OAUTH_URL')) ? '-custom-oauth' : ''}.json`
+    limit = fableLimit(JSON.parse(await $.fs.read(file)), now)
+  } catch {
+    return // Unreadable or torn: keep what is drawn until the next look.
+  }
+  await update($, fableAtom, () => limit)
+}
 
 /** `context` only when its fill moved (or on a full reading); `tokens` is absent before the first response. */
 async function measured($: EngineInterface, rateLimits: readonly SessionRateLimit[], cost?: SessionCost, context?: SessionContextUsage) {
   const limits = rateLimits.map(({ kind, percentUsed, resetsAt }): Limit => (resetsAt ? { kind, percentUsed, resetsAt } : { kind, percentUsed }))
   await update($, limitsAtom, () => limits)
   await update($, costAtom, () => cost?.usd ?? null)
+  await fable($, rateLimits)
   if (context) {
     const next = context.tokens === undefined ? null : { tokens: context.tokens, window: context.window, percent: context.percent }
     await update($, contextAtom, () => next)
@@ -124,6 +167,7 @@ export const register: Register = (on, options) => {
       await $.clock.now(),
       await read($, contextAtom),
       warmAt === null ? null : { at: warmAt, ttl: warmTtl },
+      await read($, fableAtom),
     )
     if (pills.length === 0) return next(e)
 

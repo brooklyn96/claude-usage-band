@@ -2,8 +2,10 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, SessionRateLimit, TurnUsage } from 'claude-code'
 
-import { CTX_COLORS, TERM_PALETTE, TRACK, alt, cells, ctxLevel, formatCtxTokens, formatLeft, formatTokens, formatWarm, pillSvg, pillsOf, remainingFraction, termLayout, termPill, warmLevel } from './pills'
-import type { Run } from './pills'
+import type { Limit } from '../types'
+
+import { COLORS, CTX_COLORS, TERM_PALETTE, TRACK, alt, cells, ctxLevel, fableLimit, formatCtxTokens, formatLeft, formatTokens, formatWarm, pillSvg, pillsOf, remainingFraction, termLayout, termPill, warmLevel } from './pills'
+import type { RatePill, Run } from './pills'
 
 const H = 3_600_000
 const NOW = Date.UTC(2026, 9, 3, 12, 0, 0)
@@ -638,3 +640,291 @@ test('a refresh that rejects does not throw', async ($, on) => {
   await clock.advance(30_000)
   expect(await ui.findAll({ type: 'Text' })).toHaveLength(0)
 })
+
+// Team: no seven_day window; Claude Code's cached usage reply holds the Fable weekly one.
+const TEAM: SessionRateLimit[] = [LIMITS[0]!]
+const fableEntry = (over: Record<string, unknown> = {}) => ({
+  kind: 'weekly_scoped',
+  group: 'weekly',
+  percent: 2,
+  resets_at: new Date(NOW + 4 * 24 * H).toISOString().replace('Z', '000+00:00'),
+  scope: { model: { id: null, display_name: 'Fable' }, surface: null },
+  ...over,
+})
+const cacheOf = (...limits: unknown[]) => cacheAt(NOW, ...limits)
+const cacheAt = (fetchedAtMs: number, ...limits: unknown[]) => JSON.stringify({ cachedUsageUtilization: { fetchedAtMs, utilization: { seven_day: null, limits } } })
+const SESSION_LIMIT = { kind: 'session', group: 'session', percent: 47, resets_at: iso(NOW + 3 * H) }
+const parsed = (text: string) => {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
+}
+
+/** Stubs the environment, `fs.stat` over `files` (slash path: size; any other path rejects as a missing one does) and the cache file (null: unreadable); `reads` collects every path read, `calls` every env.get and fs.stat. */
+function cacheFile(on: On, text: string | null | (() => string | null | Promise<string | null>), env: Record<string, string> = { USERPROFILE: '/home/u/' }, files: Record<string, number | { kind: 'dir'; size: number }> = {}) {
+  const reads: string[] = []
+  const calls = { env: 0, stat: 0 }
+  on('env.get', (_, e) => {
+    calls.env++
+    return { value: env[e.name] }
+  })
+  on('fs.stat', (_, e) => {
+    calls.stat++
+    const size = files[e.path.replaceAll('\\', '/').replace(/^[A-Za-z]:/, '')]
+    return size === undefined ? { deny: 'ENOENT' } : { value: { kind: 'file', ...(typeof size === 'number' ? { size } : size), mtimeMs: 0, isLink: false } }
+  })
+  on('fs.read', async (_, e) => {
+    reads.push(e.path)
+    const now = typeof text === 'function' ? await text() : text
+    return now === null ? { deny: 'ENOENT' } : { value: now }
+  })
+  return Object.assign(reads, { calls })
+}
+const alts = async (ui: { findAll: (q: { type: string }) => Promise<{ props: Record<string, unknown> }[]> }) => (await ui.findAll({ type: 'Svg' })).map(s => String(s.props.alt))
+
+test('Team: the Fable weekly pill takes the 7d pill place, from the cached usage reading', async ($, on) => {
+  engine(on, TEAM)
+  const reads = cacheFile(on, cacheOf(SESSION_LIMIT, fableEntry()))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(reads).toHaveLength(1)
+  expect(reads[0]!.replaceAll('\\', '/')).toMatch(/\/home\/u\/\.claude\.json$/)
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
+  expect(await alts(ui)).toEqual(['5-hour limit 80% left, resets in 2h 40m', 'Fable 7-day limit 98% left, resets in 4d 0h'])
+  const [, fable] = await ui.findAll({ type: 'Svg' })
+  const source = String(fable!.props.source)
+  expect(source).toContain('>F<') // the Svg pill is no wider than 7d's
+  expect(source).toContain('fill="#333333"') // the time tick
+  expect(source).toContain(COLORS['7d'].bg)
+
+  for (const surface of ['vscode', 'mobile'] as const) {
+    const other = await $.ui.mount({ plugin: 'usage-band', surface, ...BAND })
+    expect(await alts(other)).toContain('Fable 7-day limit 98% left, resets in 4d 0h')
+  }
+  const term = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', ...BAND })
+  const text = (await term.findAll({ type: 'Text' })).map(t => t.text).join('')
+  for (const figure of ['5h', 'Fable', '98%', '4d 0h']) expect(text).toContain(figure)
+  expect(text).toContain('\u{f14f7}')
+  expect(text).not.toContain('7d')
+  const pill = await term.find({ key: 'fable' })
+  expect((pill!.children as { props?: { backgroundColor?: string } }[]).map(c => c.props?.backgroundColor)).toContain(TERM_PALETTE.dark.pill['7d'].bg)
+})
+
+test('Team with unicode glyphs: Fable has its own plain glyph', { options: { glyphs: 'unicode' } }, async ($, on) => {
+  engine(on, TEAM)
+  cacheFile(on, cacheOf(fableEntry()))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const term = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', ...BAND })
+  const text = (await term.findAll({ type: 'Text' })).map(t => t.text).join('')
+  expect(text).toContain('◧')
+  expect(text).toContain('Fable')
+  expect([...text].some(c => c.codePointAt(0)! > 0xffff)).toBe(false)
+})
+
+test('Max: seven_day present keeps the 7d pill and never reads the cache file', async ($, on) => {
+  const clock = engine(on, LIMITS)
+  const reads = cacheFile(on, cacheOf(fableEntry()))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: LIMITS, changed: [] })
+  await clock.advance(120_000)
+  expect(reads).toEqual([])
+  expect(reads.calls).toEqual({ env: 0, stat: 0 })
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
+  expect(await alts(ui)).toEqual(['5-hour limit 80% left, resets in 2h 38m', '7-day limit 42% left, resets in 1d 6h'])
+})
+
+test('the cache file is looked at once a minute at most, on the clock and on session.measure', async ($, on) => {
+  const clock = engine(on, TEAM)
+  const reads = cacheFile(on, cacheOf(fableEntry()))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(30_000)
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: TEAM, changed: [] })
+  expect(reads).toHaveLength(1)
+  await clock.advance(30_000)
+  expect(reads).toHaveLength(2)
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: TEAM, changed: [] })
+  expect(reads).toHaveLength(2)
+  await clock.advance(60_000)
+  expect(reads).toHaveLength(3)
+})
+
+test('no Fable pill and no throw when the cache file or its Fable entry is missing or malformed', async ($, on) => {
+  const files = [
+    'not json {',
+    '[]',
+    '{}',
+    JSON.stringify({ cachedUsageUtilization: { utilization: { limits: 'x' } } }),
+    cacheOf(SESSION_LIMIT),
+    cacheOf(fableEntry({ scope: { model: { display_name: 'Opus' } } })),
+    cacheOf(fableEntry({ group: 'session' })),
+    cacheOf(fableEntry({ percent: '2' })),
+    cacheOf(fableEntry({ resets_at: 'soon' })),
+    cacheOf(fableEntry({ resets_at: iso(NOW - H) })), // that window is over
+  ]
+  for (const text of files) expect(fableLimit(parsed(text), NOW)).toBe(null)
+  expect(fableLimit(null, NOW)).toBe(null)
+
+  engine(on, TEAM)
+  cacheFile(on, null) // unreadable
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
+  expect(await alts(ui)).toEqual(['5-hour limit 80% left, resets in 2h 40m'])
+})
+
+test('Fable entry matches on the name, whatever its case', () => {
+  const limit = fableLimit(parsed(cacheOf(SESSION_LIMIT, fableEntry({ percent: 61.4, scope: { model: { display_name: 'Claude FABLE 5' } } }))), NOW)
+  expect(limit).toEqual({ kind: 'fable', percentUsed: 61.4, resetsAt: iso(NOW + 4 * 24 * H), fetchedAtMs: NOW })
+  expect(Math.round(remainingFraction(limit!, NOW)! * 1000)).toBe(571)
+  expect(pillsOf(TEAM, null, null, NOW, null, null, limit).map(p => p.id)).toEqual(['5h', 'fable'])
+  // seven_day wins when both are known
+  expect(pillsOf(LIMITS, null, null, NOW, null, null, limit).map(p => p.id)).toEqual(['5h', '7d'])
+  // never Fable alone: with no live limits it is no pill
+  expect(pillsOf([], null, null, NOW, null, null, limit).map(p => p.id)).toEqual([])
+})
+
+test('a Fable read that lands after the rate limits emptied draws no Fable pill', async ($, on) => {
+  engine(on, TEAM)
+  let release = () => {}
+  let reading = () => {}
+  const held = new Promise<void>(resolve => (release = resolve))
+  const began = new Promise<void>(resolve => (reading = resolve))
+  cacheFile(on, async () => {
+    reading()
+    await held
+    return cacheOf(SESSION_LIMIT, fableEntry())
+  })
+  const started = $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await began // the read is in flight
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: [], changed: [] })
+  release()
+  await started
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
+  expect((await alts(ui)).some(a => a.startsWith('Fable'))).toBe(false)
+})
+
+test("Team's 86-column terminal keeps 5h, Fable, cache warm, context and cost on one line", async ($, on) => {
+  engine(on, TEAM, 4.32)
+  cacheFile(on, cacheOf(fableEntry()))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.session.measure({ context: { window: 200_000, tokens: 210_400, percent: 21 }, rateLimits: TEAM, cost: { usd: 4.32 }, changed: ['context'] })
+  await respond($, 't1', 0, usageOf(3000, 3000, 954_200, 12_600))
+  const term = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', ...BAND, props: { ...BAND.props, bodyColumns: 86 } })
+  expect(await term.drawn()).toMatchObject({ type: 'Box', props: { flexWrap: 'nowrap' } })
+  for (const id of ['5h', 'fable', 'warm', 'ctx', 'cost'] as const) expect(await term.find({ key: id })).toBeDefined()
+  const text = (await term.findAll({ type: 'Text' })).map(t => t.text).join('')
+  // compact step: Fable is a single F beside its glyph
+  for (const figure of ['5h', '\u{f14f7} F ', '98%', '4d0h', '60m', '210k', '$4.32']) expect(text).toContain(figure)
+})
+
+test('Fable in the 7d slot: the Svg pill is no wider than the 7d one', () => {
+  const limit: Limit = { kind: 'fable', percentUsed: 2, resetsAt: iso(NOW + 4 * 24 * H), fetchedAtMs: NOW }
+  const week = (l: Limit[], f: Limit | null) => pillSvg(pillsOf(l, null, null, NOW, null, null, f)[1]!).width
+  expect(week(TEAM, limit)).toBeLessThanOrEqual(week(LIMITS, null))
+})
+
+test('worst-case figures fit one line at 86 columns on Team and Max, nerd and unicode; Fable is never wider than 7d at compact steps', () => {
+  const fable: Limit = { kind: 'fable', percentUsed: 0, resetsAt: iso(NOW + 6 * 24 * H + 23 * H), fetchedAtMs: NOW }
+  const five: SessionRateLimit = { kind: 'five_hour', percentUsed: 0, resetsAt: iso(NOW + 4 * H + 59 * 60_000) }
+  const seven: SessionRateLimit = { kind: 'seven_day', percentUsed: 0, resetsAt: iso(NOW + 6 * 24 * H + 23 * H) }
+  const tokens = { input: 15_600, output: 3_000, cache: 954_200 }
+  const context = { tokens: 210_400, window: 1_000_000 }
+  const warm = { at: NOW, ttl: 60 * 60_000 }
+  for (const glyphs of ['nerd', 'unicode'] as const) {
+    for (const light of [false, true]) {
+      const team = termLayout(pillsOf([five], tokens, 123.45, NOW, context, warm, fable), 86, glyphs, light)
+      const max = termLayout(pillsOf([five, seven], tokens, 123.45, NOW, context, warm), 86, glyphs, light)
+      expect(team.wrap).toBe(false)
+      expect(team.width).toBeLessThanOrEqual(86)
+      expect(max.wrap).toBe(false)
+      expect(max.width).toBeLessThanOrEqual(86)
+      const [, f] = pillsOf([five], null, null, NOW, null, null, fable)
+      const [, w] = pillsOf([five, seven], null, null, NOW, null, null)
+      for (let step = 3; step <= 5; step++) expect(cells(termPill(f!, glyphs, light, step))).toBeLessThanOrEqual(cells(termPill(w!, glyphs, light, step)))
+    }
+  }
+})
+
+test('a reading older than an hour draws dimmed with its age; a fresh one looks like the 7d pill', async ($, on) => {
+  engine(on, TEAM)
+  cacheFile(on, cacheAt(NOW - 2 * H, SESSION_LIMIT, fableEntry()))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
+  expect(await alts(ui)).toEqual(['5-hour limit 80% left, resets in 2h 40m', 'Fable 7-day limit 98% left, resets in 4d 0h — reading from 2h ago'])
+  const source = String((await ui.findAll({ type: 'Svg' }))[1]!.props.source)
+  expect(source).toContain(CTX_COLORS.cold.bg)
+  expect(source).not.toContain(COLORS['7d'].bg)
+  const term = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', ...BAND })
+  const pill = await term.find({ key: 'fable' })
+  expect((pill!.children as { props?: { backgroundColor?: string } }[]).map(c => c.props?.backgroundColor)).toContain(TERM_PALETTE.dark.ctx.cold.bg)
+
+  const resetsAt = iso(NOW + 4 * 24 * H)
+  const pillOf = (fetchedAtMs?: number) => pillsOf(TEAM, null, null, NOW, null, null, { kind: 'fable', percentUsed: 2, resetsAt, ...(fetchedAtMs === undefined ? {} : { fetchedAtMs }) })[1] as RatePill
+  expect(pillOf(NOW).age).toBeUndefined()
+  expect(pillOf(NOW - H).age).toBeUndefined() // exactly an hour is still fresh
+  expect(pillOf(NOW - H - 1).age).toBe('1h')
+  expect(pillOf(NOW - 3 * 24 * H).age).toBe('3d')
+  expect(pillOf().age).toBe('unknown')
+  expect(alt(pillOf())).toContain('reading of unknown age')
+  expect(alt(pillOf(NOW))).not.toContain('reading')
+})
+
+test('a Fable window that is over is no pill, even from a value kept after a failed read', () => {
+  const old: Limit = { kind: 'fable', percentUsed: 2, resetsAt: iso(NOW - 1), fetchedAtMs: NOW - 8 * 24 * H }
+  expect(pillsOf(TEAM, null, null, NOW, null, null, old).map(p => p.id)).toEqual(['5h'])
+})
+
+test('an unreadable or torn cache file keeps the last Fable value; a file without the entry clears it', async ($, on) => {
+  const clock = engine(on, TEAM)
+  let text: string | null = cacheOf(SESSION_LIMIT, fableEntry())
+  cacheFile(on, () => text)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
+  const hasFable = async () => (await alts(ui)).some(a => a.startsWith('Fable'))
+  expect(await hasFable()).toBe(true)
+  for (const bad of [null, '{"cachedUsageUtilization": {"fetc']) {
+    text = bad
+    await clock.advance(60_000)
+    expect(await hasFable()).toBe(true)
+  }
+  text = cacheOf(SESSION_LIMIT)
+  await clock.advance(60_000)
+  expect(await hasFable()).toBe(false)
+})
+
+test('the Fable pill of the previous account goes when the rate limits empty, and returns with the next reading', async ($, on) => {
+  engine(on, TEAM)
+  const reads = cacheFile(on, cacheOf(SESSION_LIMIT, fableEntry()))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
+  const hasFable = async () => (await alts(ui)).some(a => a.startsWith('Fable'))
+  expect(await hasFable()).toBe(true)
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: [], changed: [] })
+  expect(await hasFable()).toBe(false)
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: TEAM, changed: [] })
+  expect(reads).toHaveLength(2) // read again at once, not after the minute
+  expect(await hasFable()).toBe(true)
+})
+
+// Claude Code's own resolution: the legacy file (`<CLAUDE_CONFIG_DIR ?? ~/.claude>/.config.json`, a non-empty file) first, else the main file under `CLAUDE_CONFIG_DIR || home`; USERPROFILE on Windows only.
+const PATHS: [string, Record<string, string>, Record<string, number | { kind: 'dir'; size: number }>, RegExp][] = [
+  ['Windows: USERPROFILE', { USERPROFILE: 'C:\\Users\\u', OS: 'Windows_NT', HOME: '/c/Users/u' }, {}, /^\/Users\/u\/\.claude\.json$/],
+  ['Linux or WSL with USERPROFILE exported: HOME', { USERPROFILE: 'C:\\Users\\u', HOME: '/home/u' }, {}, /^\/home\/u\/\.claude\.json$/],
+  ['CLAUDE_CONFIG_DIR', { HOME: '/home/u/', CLAUDE_CONFIG_DIR: '/cfg/' }, {}, /^\/cfg\/\.claude\.json$/],
+  ['legacy ~/.claude/.config.json, non-empty, wins', { HOME: '/home/u' }, { '/home/u/.claude/.config.json': 10 }, /^\/home\/u\/\.claude\/\.config\.json$/],
+  ['a decoy ~/.config.json is not the legacy file', { HOME: '/home/u' }, { '/home/u/.config.json': 10 }, /^\/home\/u\/\.claude\.json$/],
+  ['an empty legacy file is passed over', { HOME: '/home/u' }, { '/home/u/.claude/.config.json': 0 }, /^\/home\/u\/\.claude\.json$/],
+  ['a directory named .config.json is not the legacy file', { HOME: '/home/u' }, { '/home/u/.claude/.config.json': { kind: 'dir', size: 4096 } }, /^\/home\/u\/\.claude\.json$/],
+  ['legacy file under CLAUDE_CONFIG_DIR', { HOME: '/home/u', CLAUDE_CONFIG_DIR: '/cfg/' }, { '/cfg/.config.json': 10 }, /^\/cfg\/\.config\.json$/],
+  ['custom OAuth endpoint', { HOME: '/home/u', CLAUDE_CODE_CUSTOM_OAUTH_URL: 'https://x.example' }, {}, /^\/home\/u\/\.claude-custom-oauth\.json$/],
+]
+for (const [name, env, files, path] of PATHS) {
+  test(`the cache file is found as Claude Code finds it: ${name}`, async ($, on) => {
+    engine(on, TEAM)
+    const reads = cacheFile(on, cacheOf(fableEntry()), env, files)
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+    expect(reads).toHaveLength(1)
+    // the host resolves the path to the platform's form: compare the slash form without a drive
+    expect(reads[0]!.replaceAll('\\', '/').replace(/^[A-Za-z]:/, '')).toMatch(path)
+  })
+}
