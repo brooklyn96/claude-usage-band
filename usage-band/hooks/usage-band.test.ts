@@ -252,6 +252,22 @@ test('desktop tree holds the pills in order, terminal the same figures', async (
   expect(await survey.findAll({ type: 'Svg' })).toHaveLength(0)
 })
 
+test('every Svg surface draws the Svg pills; only the terminal draws text pills', async ($, on) => {
+  engine(on, LIMITS, 4.321)
+  await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
+  for (const surface of ['desktop', 'vscode', 'mobile'] as const) {
+    const ui = await $.ui.mount({ plugin: 'usage-band', surface, ...BAND })
+    const svgs = await ui.findAll({ type: 'Svg' })
+    expect(svgs.map(s => String(s.props.alt))).toContain('5-hour limit 80% left, resets in 2h 40m')
+    expect(svgs.map(s => String(s.props.alt))).toContain('Session cost $4.32')
+    expect(await ui.findAll({ type: 'Text' })).toHaveLength(0)
+    await ui.unmount()
+  }
+  const term = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', ...BAND })
+  expect(await term.findAll({ type: 'Svg' })).toHaveLength(0)
+  expect((await term.findAll({ type: 'Text' })).map(t => t.text).join('')).toContain('80%')
+})
+
 test('time left and tick refresh on the clock', async ($, on) => {
   const clock = engine(on, LIMITS)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })

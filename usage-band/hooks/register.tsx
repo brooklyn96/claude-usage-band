@@ -130,7 +130,9 @@ export const register: Register = (on, options) => {
     const left = pills.filter(p => p.id !== 'cost')
     const cost = pills.find((p): p is ValuePill => p.id === 'cost')
 
-    if (e.surface === 'desktop') {
+    // Nerd Font text pills belong to the terminal alone; desktop, vscode, mobile and
+    // any later surface draw the Svg pills, which wrap on a narrow panel.
+    if (e.surface !== 'terminal') {
       const { Box, Svg } = $.ui.resolve(e)
       const pill = (p: Pill) => {
         const { source, width } = pillSvg(p)
