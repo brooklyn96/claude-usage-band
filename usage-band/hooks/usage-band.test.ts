@@ -4,7 +4,7 @@ import type { On, SessionRateLimit, TurnUsage } from 'claude-code'
 
 import type { Limit } from '../types'
 
-import { COLORS, CTX_COLORS, TERM_PALETTE, TRACK, alt, cells, ctxLevel, fableLimit, formatCtxTokens, formatLeft, formatTokens, formatWarm, pillSvg, pillsOf, remainingFraction, termLayout, termPill, warmLevel } from './pills'
+import { COLORS, CTX_COLORS, TERM_PALETTE, TRACK, alt, cells, ctxLevel, fableLimit, formatCtxTokens, formatLeft, formatTokens, formatWarm, hitLevel, pillSvg, pillsOf, remainingFraction, termLayout, termPill, warmLevel } from './pills'
 import type { RatePill, Run } from './pills'
 
 const H = 3_600_000
@@ -126,8 +126,8 @@ test('pills with no data are left out', () => {
 test('the warm pill sits after the cache pill, its bar and colour stepping by the share left', () => {
   const TTL = 60 * 60_000
   const warmPill = (remaining: number) => pillsOf([], null, null, NOW, null, { at: NOW - (1 - remaining) * TTL, ttl: TTL })[0]!
-  expect(pillsOf([], { input: 15_600, output: 3_000, cache: 954_200 }, 4.32, NOW, { tokens: 210_400, window: 1_000_000 }, { at: NOW, ttl: TTL }).map(p => p.id)).toEqual([
-    'in', 'out', 'cache', 'warm', 'ctx', 'cost',
+  expect(pillsOf([], { input: 15_600, cache: 954_200 }, 4.32, NOW, { tokens: 210_400, window: 1_000_000 }, { at: NOW, ttl: TTL }).map(p => p.id)).toEqual([
+    'hit', 'cache', 'warm', 'ctx', 'cost',
   ])
   expect(warmPill(1)).toMatchObject({ id: 'warm', remaining: 1, label: '60m' })
   expect(warmPill(0.75)).toMatchObject({ remaining: 0.75, label: '45m' })
@@ -180,7 +180,8 @@ test('token totals add up across two responses', async ($, on) => {
   await respond($, 't2', 0, usageOf(2000, 2500, 554_200, 10_000))
   const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
   const alts = (await ui.findAll({ type: 'Svg' })).map(s => String(s.props.alt))
-  expect(alts).toEqual(['Input tokens 15.6k', 'Output tokens 3.0k', 'Cache read 954.2k', 'Prompt cache warm for 60m'])
+  // 954.2k read of 15.6k + 954.2k
+  expect(alts).toEqual(['Cache hit rate 98%', 'Cache read 954.2k', 'Prompt cache warm for 60m'])
 })
 
 test('token totals move after each response, before the turn ends', async ($, on) => {
@@ -189,12 +190,12 @@ test('token totals move after each response, before the turn ends', async ($, on
   const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
   const alts = async () => (await ui.findAll({ type: 'Svg' })).map(s => String(s.props.alt))
   await respond($, 't1', 0, usageOf(1000, 500, 400_000, 2_600))
-  expect(await alts()).toEqual(['Input tokens 3.6k', 'Output tokens 500', 'Cache read 400.0k', 'Prompt cache warm for 60m', 'Session cost $0.50'])
+  expect(await alts()).toEqual(['Cache hit rate 99%', 'Cache read 400.0k', 'Prompt cache warm for 60m', 'Session cost $0.50'])
   await respond($, 't1', 1, usageOf(2000, 2500, 554_200, 10_000))
-  expect(await alts()).toEqual(['Input tokens 15.6k', 'Output tokens 3.0k', 'Cache read 954.2k', 'Prompt cache warm for 60m', 'Session cost $0.50'])
+  expect(await alts()).toEqual(['Cache hit rate 98%', 'Cache read 954.2k', 'Prompt cache warm for 60m', 'Session cost $0.50'])
   // a response with no usage (interrupted, failed) adds nothing
   await respond($, 't1', 2, null)
-  expect(await alts()).toContain('Input tokens 15.6k')
+  expect(await alts()).toContain('Cache read 954.2k')
 })
 
 test("a turn's end adds nothing on top of its responses", async ($, on) => {
@@ -204,7 +205,106 @@ test("a turn's end adds nothing on top of its responses", async ($, on) => {
   await $.turn.complete({ ...turn(3000, 3000, 954_200, 12_600), turnId: 't1' })
   const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
   const alts = (await ui.findAll({ type: 'Svg' })).map(s => String(s.props.alt))
-  expect(alts).toEqual(['Input tokens 15.6k', 'Output tokens 3.0k', 'Cache read 954.2k', 'Prompt cache warm for 60m'])
+  expect(alts).toEqual(['Cache hit rate 98%', 'Cache read 954.2k', 'Prompt cache warm for 60m'])
+})
+
+test('hit rate: cache reads over every input token, cache writes included, output left out', async ($, on) => {
+  engine(on, [])
+  // 600 read of 100 input + 300 written + 600 read = 60%; with output counted it would be 5%, without the writes 86%
+  await respond($, 't1', 0, usageOf(100, 9_999, 600, 300))
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
+  expect(await alts(ui)).toContain('Cache hit rate 60%')
+  // summed over the session, a subagent's response too
+  await respond($, 't1', 1, usageOf(1_000, 9_999, 0, 0), 'sub-1')
+  expect(await alts(ui)).toContain('Cache hit rate 30%')
+
+  expect(pillsOf([], { input: 200, cache: 800 }, null, NOW)[0]).toEqual({ id: 'hit', percent: 80 })
+  expect(pillsOf([], { input: 1, cache: 0 }, null, NOW)[0]).toEqual({ id: 'hit', percent: 0 })
+  expect(pillsOf([], { input: 0, cache: 5 }, null, NOW)[0]).toEqual({ id: 'hit', percent: 100 })
+  expect(alt({ id: 'hit', percent: 94 })).toBe('Cache hit rate 94%')
+})
+
+test('hit rate is hidden while nothing has been read or sent', async ($, on) => {
+  expect(pillsOf([], { input: 0, cache: 0 }, null, NOW).map(p => p.id)).toEqual(['cache'])
+  engine(on, [])
+  await respond($, 't1', 0, usageOf(0, 50, 0, 0))
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
+  expect((await alts(ui)).some(a => a.startsWith('Cache hit rate'))).toBe(false)
+  expect(await alts(ui)).toContain('Cache read 0')
+})
+
+test('hit rate colour: 80% and up good, 50-80% amber, under 50% red, in every palette', () => {
+  for (const [percent, level] of [[100, 'ok'], [80, 'ok'], [79, 'warn'], [50, 'warn'], [49, 'high'], [0, 'high']] as const) {
+    expect(hitLevel(percent)).toBe(level)
+    const hit = { id: 'hit', percent } as const
+    expect(pillSvg(hit).source).toContain(`fill="${CTX_COLORS[level].bg}"`)
+    expect(pillSvg(hit).source).toContain(`fill="${CTX_COLORS[level].fg}"`)
+    expect(pillSvg(hit).source).toContain(`>${percent}%<`)
+    for (const glyphs of ['nerd', 'unicode'] as const) {
+      for (const light of [false, true]) {
+        const pal = TERM_PALETTE[light ? 'light' : 'dark']
+        const runs = termPill(hit, glyphs, light)
+        expect(runs.some(r => r.bg === pal.ctx[level].bg)).toBe(true)
+        expect(runs.some(r => r.fg === pal.ctx[level].fg)).toBe(true)
+        expect(runs.map(r => r.s).join('')).toContain(`${percent}%`)
+        // whole cells: the rate's share of the 4-cell bar, 3 when short
+        expect(cells(runs.filter(r => r.bg === pal.ctx[level].fg))).toBe(Math.round((percent / 100) * 4))
+        expect(cells(termPill(hit, glyphs, light, 3).filter(r => r.bg === pal.ctx[level].fg))).toBe(Math.round((percent / 100) * 3))
+      }
+    }
+  }
+  // a rate that rounds to 80 reads and colours as 80
+  expect(pillsOf([], { input: 2_005, cache: 7_995 }, null, NOW)[0]).toEqual({ id: 'hit', percent: 80 })
+})
+
+test('hit rate glyph: md-target with a Nerd Font, the bullseye in Cascadia Mono otherwise, one cell each', () => {
+  const hit = { id: 'hit', percent: 94 } as const
+  expect(termPill(hit, 'nerd', false).map(r => r.s).join('')).toContain('\u{f04fe} ')
+  expect(termPill(hit, 'unicode', false).map(r => r.s).join('')).toContain('◎ ')
+  for (const glyphs of ['nerd', 'unicode'] as const) expect(cells(termPill(hit, glyphs, false))).toBe(12)
+  // the Svg pill draws its own target icon
+  expect(pillSvg(hit).source).toContain('<circle cx="12" cy="12" r="6"/>')
+})
+
+test('hit rate resets on clear and resume, back on the next response', async ($, on) => {
+  engine(on, [])
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+  await respond($, 't1', 0, usageOf(100, 500, 900, 0))
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
+  expect(await alts(ui)).toContain('Cache hit rate 90%')
+  for (const reason of ['clear', 'resume'] as const) {
+    await $.session.end({ reason, sessionId: 's1', resume: { id: 's0' } })
+    expect((await alts(ui)).some(a => a.startsWith('Cache hit rate'))).toBe(false)
+    // the new session's figures alone, not added to the old ones
+    await respond($, 't2', 0, usageOf(500, 500, 500, 0))
+    expect(await alts(ui)).toContain('Cache hit rate 50%')
+    await respond($, 't3', 0, usageOf(100, 500, 900, 0))
+    expect(await alts(ui)).toContain('Cache hit rate 70%')
+    await $.session.end({ reason, sessionId: 's1', resume: { id: 's0' } })
+    await respond($, 't1', 0, usageOf(100, 500, 900, 0))
+  }
+})
+
+test('no token up/down pill anywhere', async ($, on) => {
+  expect(Object.keys(COLORS)).not.toContain('in')
+  expect(Object.keys(COLORS)).not.toContain('out')
+  for (const pal of [TERM_PALETTE.dark, TERM_PALETTE.light]) expect(Object.keys(pal.pill).sort()).toEqual(['5h', '7d', 'cache', 'cost', 'fable'])
+  for (const glyphs of ['nerd', 'unicode'] as const) {
+    for (let columns = 40; columns <= 200; columns++) {
+      const row = termLayout(FULL, columns, glyphs, false)
+      expect(ids(row).some(id => id === 'in' || id === 'out')).toBe(false)
+      expect(body(row)).not.toContain('\u{f011d}')
+      expect(body(row)).not.toContain('\u{f0120}')
+      expect(body(row)).not.toContain('↑')
+      expect(body(row)).not.toContain('↓')
+    }
+  }
+  engine(on, LIMITS, 4.32)
+  await respond($, 't1', 0, usageOf(3000, 3000, 954_200, 12_600))
+  const desk = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
+  for (const a of await alts(desk)) expect(a).not.toMatch(/Input tokens|Output tokens/)
+  const term = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', ...BAND })
+  for (const id of ['in', 'out']) expect(await term.find({ key: id })).toBeUndefined()
 })
 
 test('desktop tree holds the pills in order, terminal the same figures', async ($, on) => {
@@ -217,8 +317,7 @@ test('desktop tree holds the pills in order, terminal the same figures', async (
   expect(svgs.map(s => String(s.props.alt))).toEqual([
     '5-hour limit 80% left, resets in 2h 40m',
     '7-day limit 42% left, resets in 1d 7h',
-    'Input tokens 15.6k',
-    'Output tokens 3.0k',
+    'Cache hit rate 98%',
     'Cache read 954.2k',
     'Prompt cache warm for 60m',
     'Session cost $4.32',
@@ -228,7 +327,7 @@ test('desktop tree holds the pills in order, terminal the same figures', async (
 
   const term = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', ...BAND })
   const text = (await term.drawn()) && (await term.findAll({ type: 'Text' })).map(t => t.text).join('')
-  const order = ['5h', '80%', '2h 40m', '7d', '42%', '1d 7h', '15.6k', '3.0k', '60m', '$4.32']
+  const order = ['5h', '80%', '2h 40m', '7d', '42%', '1d 7h', '98%', '60m', '$4.32']
   let at = -1
   for (const figure of order) {
     const next = text.indexOf(figure, at + 1)
@@ -240,11 +339,15 @@ test('desktop tree holds the pills in order, terminal the same figures', async (
   expect(text).toContain('\u{f051f}') // the warm pill's md-timer_sand
   expect(text).toContain('') // nerd glyphs by default
   // each pill, the cost one included, on its own tinted background
-  for (const id of ['5h', '7d', 'in', 'out', 'cost'] as const) {
+  for (const id of ['5h', '7d', 'cost'] as const) {
     const pill = await term.find({ key: id })
     const bgs = (pill!.children as { props?: { backgroundColor?: string } }[]).map(c => c.props?.backgroundColor)
     expect(bgs).toContain(TERM_PALETTE.dark.pill[id].bg)
   }
+  // the hit rate pill's tint is its level's: 98% is good
+  const hit = await term.find({ key: 'hit' })
+  expect((hit!.children as { props?: { backgroundColor?: string } }[]).map(c => c.props?.backgroundColor)).toContain(TERM_PALETTE.dark.ctx.ok.bg)
+  expect(text).toContain('\u{f04fe}') // md-target
   // the warm pill's tint is its level's, not a fixed pill colour
   const warm = await term.find({ key: 'warm' })
   const warmBgs = (warm!.children as { props?: { backgroundColor?: string } }[]).map(c => c.props?.backgroundColor)
@@ -280,7 +383,7 @@ test('time left and tick refresh on the clock', async ($, on) => {
 })
 
 test('pills fit the reference strip width', () => {
-  const pills = pillsOf(LIMITS, { input: 15_600, output: 3_000, cache: 954_200 }, 4.32, NOW)
+  const pills = pillsOf(LIMITS, { input: 15_600, cache: 954_200 }, 4.32, NOW)
   const total = pills.reduce((sum, p) => sum + pillSvg(p).width, 0)
   expect(total).toBeLessThanOrEqual(760)
 })
@@ -355,7 +458,7 @@ test('a subagent step leaves the warm countdown alone', async ($, on) => {
   await respond($, 't1', 1, usageOf(2000, 2500, 554_200, 10_000), 'sub-1')
   const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', ...BAND })
   const alts = (await ui.findAll({ type: 'Svg' })).map(s => String(s.props.alt))
-  expect(alts).toContain('Input tokens 15.6k')
+  expect(alts).toContain('Cache hit rate 98%')
   expect(alts).toContain('Prompt cache warm for 56m')
 })
 
@@ -391,9 +494,9 @@ test("the user's 86-column terminal keeps 5h, 7d, cache warm, context and cost o
   await respond($, 't1', 0, usageOf(3000, 3000, 954_200, 12_600))
   const term = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', ...BAND, props: { ...BAND.props, bodyColumns: 86 } })
   expect(await term.drawn()).toMatchObject({ type: 'Box', props: { flexWrap: 'nowrap' } })
-  // exactly this pill set: the token up/down pills are the ones the 86-column row drops
+  // exactly this pill set: the hit rate and cache read pills are the ones the 86-column row drops
   for (const id of ['5h', '7d', 'warm', 'ctx', 'cost'] as const) expect(await term.find({ key: id })).toBeDefined()
-  for (const id of ['in', 'out', 'cache'] as const) expect(await term.find({ key: id })).toBeUndefined()
+  for (const id of ['hit', 'cache', 'in', 'out'] as const) expect(await term.find({ key: id })).toBeUndefined()
   const text = (await term.findAll({ type: 'Text' })).map(t => t.text).join('')
   for (const figure of ['5h', '80%', '2h40m', '7d', '42%', '1d7h', '60m', '210k', '$4.32']) expect(text).toContain(figure)
 })
@@ -409,33 +512,34 @@ test('a reload with no session.start still reads usage and keeps the clock', asy
   expect(String((await ui.findAll({ type: 'Svg' }))[0]!.props.alt)).toContain('2h 39m')
 })
 
-const FULL = pillsOf(LIMITS, { input: 15_600, output: 3_000, cache: 954_200 }, 4.32, NOW, { tokens: 210_400, window: 1_000_000 }, { at: NOW, ttl: 60 * 60_000 })
+const FULL = pillsOf(LIMITS, { input: 15_600, cache: 954_200 }, 4.32, NOW, { tokens: 210_400, window: 1_000_000 }, { at: NOW, ttl: 60 * 60_000 })
 const ids = (row: { pills: { id: string }[] }) => row.pills.map(p => p.id)
 const body = (row: { pills: { runs: { s: string }[] }[] }) => row.pills.map(p => p.runs.map(r => r.s).join('')).join(' ')
 
-test('terminal ladder: full, no cache, short bars, compact labels, no token pills, wrap', () => {
+test('terminal ladder: full, no cache, short bars, compact labels, no hit rate pill, wrap', () => {
   for (const glyphs of ['nerd', 'unicode'] as const) {
-    const at124 = termLayout(FULL, 124, glyphs, false)
-    expect(at124).toMatchObject({ step: 1, width: 123, wrap: false, spacer: true })
-    expect(ids(at124)).toEqual(['5h', '7d', 'in', 'out', 'cache', 'warm', 'ctx', 'cost'])
+    // every row narrower than 0.4.2's (123, 112, 106, 98, 79): one hit rate pill in place of two token pills
+    const at118 = termLayout(FULL, 118, glyphs, false)
+    expect(at118).toMatchObject({ step: 1, width: 117, wrap: false, spacer: true })
+    expect(ids(at118)).toEqual(['5h', '7d', 'hit', 'cache', 'warm', 'ctx', 'cost'])
 
-    const at120 = termLayout(FULL, 120, glyphs, false)
-    expect(at120).toMatchObject({ step: 2, width: 112, wrap: false, spacer: true })
-    expect(ids(at120)).toEqual(['5h', '7d', 'in', 'out', 'warm', 'ctx', 'cost'])
+    const at116 = termLayout(FULL, 116, glyphs, false)
+    expect(at116).toMatchObject({ step: 2, width: 106, wrap: false, spacer: true })
+    expect(ids(at116)).toEqual(['5h', '7d', 'hit', 'warm', 'ctx', 'cost'])
     // the divider is the muted '▏' run, not a bare block glyph anywhere in the row
-    const dividers = at120.pills.flatMap(p => p.runs).filter(r => r.s.includes('▏'))
+    const dividers = at116.pills.flatMap(p => p.runs).filter(r => r.s.includes('▏'))
     expect(dividers.length).toBeGreaterThan(0)
     for (const r of dividers) expect(r.fg).toBe(TERM_PALETTE.dark.muted)
 
-    const at107 = termLayout(FULL, 107, glyphs, false)
-    expect(at107).toMatchObject({ step: 3, width: 106, wrap: false, spacer: true })
-    expect(ids(at107)).toEqual(['5h', '7d', 'in', 'out', 'warm', 'ctx', 'cost'])
-
     const at100 = termLayout(FULL, 100, glyphs, false)
-    expect(at100).toMatchObject({ step: 4, width: 98, wrap: false, spacer: true })
-    expect(ids(at100)).toEqual(['5h', '7d', 'in', 'out', 'warm', 'ctx', 'cost'])
+    expect(at100).toMatchObject({ step: 3, width: 99, wrap: false, spacer: true })
+    expect(ids(at100)).toEqual(['5h', '7d', 'hit', 'warm', 'ctx', 'cost'])
 
-    // the user's terminal: the token up/down pills hide, the rest of the row stays on one line
+    const at91 = termLayout(FULL, 91, glyphs, false)
+    expect(at91).toMatchObject({ step: 4, width: 91, wrap: false, spacer: false })
+    expect(ids(at91)).toEqual(['5h', '7d', 'hit', 'warm', 'ctx', 'cost'])
+
+    // the user's terminal: the hit rate pill hides, the rest of the row stays on one line
     const at86 = termLayout(FULL, 86, glyphs, false)
     expect(at86).toMatchObject({ step: 5, width: 79, wrap: false, spacer: true })
     expect(ids(at86)).toEqual(['5h', '7d', 'warm', 'ctx', 'cost'])
@@ -447,7 +551,7 @@ test('terminal ladder: full, no cache, short bars, compact labels, no token pill
 
     const at60 = termLayout(FULL, 60, glyphs, false)
     expect(at60).toMatchObject({ step: 6, wrap: true, spacer: false })
-    expect(ids(at60)).toEqual(['5h', '7d', 'in', 'out', 'cache', 'warm', 'ctx', 'cost'])
+    expect(ids(at60)).toEqual(['5h', '7d', 'hit', 'cache', 'warm', 'ctx', 'cost'])
   }
 })
 
@@ -532,7 +636,7 @@ test('context pill: tokens kept, percent computed from tokens/window when absent
   expect(pillsOf([], null, null, NOW, { tokens: 0, window: 0 })).toEqual([{ id: 'ctx', tokens: 0, percent: 0 }])
   expect(pillsOf([], null, null, NOW, { tokens: 206_000, window: 200_000 })).toEqual([{ id: 'ctx', tokens: 206_000, percent: 100 }])
   expect(pillsOf([], null, null, NOW, null).map(p => p.id)).toEqual([])
-  expect(FULL.map(p => p.id)).toEqual(['5h', '7d', 'in', 'out', 'cache', 'warm', 'ctx', 'cost'])
+  expect(FULL.map(p => p.id)).toEqual(['5h', '7d', 'hit', 'cache', 'warm', 'ctx', 'cost'])
   expect(alt(pillsOf([], null, null, NOW, { tokens: 210_400, window: 1_000_000 })[0]!)).toBe('context 210k tokens (21% of window)')
 })
 
@@ -589,15 +693,15 @@ test('context pill follows session.measure only when context changed', async ($,
   expect((await term.findAll({ type: 'Text' })).map(t => t.text).join('')).toContain('180k')
 })
 
-test('token pills carry an icon and a figure, never a label', () => {
+test('hit rate and cache pills carry an icon and a figure, never a label', () => {
   for (const glyphs of ['nerd', 'unicode'] as const) {
     const row = termLayout(FULL, 124, glyphs, false)
     expect(row.wrap).toBe(false)
-    expect(row.pills.map(p => p.id)).toEqual(['5h', '7d', 'in', 'out', 'cache', 'warm', 'ctx', 'cost'])
-    for (const id of ['in', 'out', 'cache'] as const) {
+    expect(row.pills.map(p => p.id)).toEqual(['5h', '7d', 'hit', 'cache', 'warm', 'ctx', 'cost'])
+    for (const id of ['hit', 'cache'] as const) {
       const body = row.pills.find(p => p.id === id)!.runs.map(r => r.s).join('')
-      expect(body).not.toContain('in')
-      expect(body).not.toContain('out')
+      expect(body).not.toContain('hit')
+      expect(body).not.toContain('rate')
       expect(body).not.toContain('cache')
     }
   }
@@ -812,6 +916,7 @@ test("Team's 86-column terminal keeps 5h, Fable, cache warm, context and cost on
   const term = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', ...BAND, props: { ...BAND.props, bodyColumns: 86 } })
   expect(await term.drawn()).toMatchObject({ type: 'Box', props: { flexWrap: 'nowrap' } })
   for (const id of ['5h', 'fable', 'warm', 'ctx', 'cost'] as const) expect(await term.find({ key: id })).toBeDefined()
+  for (const id of ['hit', 'cache', 'in', 'out'] as const) expect(await term.find({ key: id })).toBeUndefined()
   const text = (await term.findAll({ type: 'Text' })).map(t => t.text).join('')
   // compact step: the sparkle alone, no label
   for (const figure of ['5h', '\u{f0ae2} ', '98%', '4d0h', '60m', '210k', '$4.32']) expect(text).toContain(figure)
@@ -842,7 +947,7 @@ test('worst-case figures fit one line at 86 columns on Team and Max, nerd and un
   const fable: Limit = { kind: 'fable', percentUsed: 0, resetsAt: iso(NOW + 6 * 24 * H + 23 * H), fetchedAtMs: NOW }
   const five: SessionRateLimit = { kind: 'five_hour', percentUsed: 0, resetsAt: iso(NOW + 4 * H + 59 * 60_000) }
   const seven: SessionRateLimit = { kind: 'seven_day', percentUsed: 0, resetsAt: iso(NOW + 6 * 24 * H + 23 * H) }
-  const tokens = { input: 15_600, output: 3_000, cache: 954_200 }
+  const tokens = { input: 15_600, cache: 954_200 }
   const context = { tokens: 210_400, window: 1_000_000 }
   const warm = { at: NOW, ttl: 60 * 60_000 }
   for (const glyphs of ['nerd', 'unicode'] as const) {

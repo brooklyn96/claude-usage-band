@@ -9,12 +9,14 @@ const WINDOWS = { five_hour: 5 * HOUR, seven_day: 7 * DAY, fable: 7 * DAY } as c
 
 /** `percent` is the quota remaining, `timeShare` the share of the window's time remaining; `age` is set (`2h`, `unknown`) on a cached reading older than STALE, which draws dimmed. */
 export type RatePill = { id: '5h' | '7d' | 'fable'; percent: number; timeShare: number | null; left: string; age?: string }
-export type ValuePill = { id: 'in' | 'out' | 'cache' | 'cost'; value: string }
+export type ValuePill = { id: 'cache' | 'cost'; value: string }
+/** `percent` is the share of the session's prompt input read from the cache, whole percent. */
+export type HitPill = { id: 'hit'; percent: number }
 /** `tokens` is the last response's input side; `percent` is the context window USED (what auto-compact reacts to), unlike the quota pills. */
 export type ContextPill = { id: 'ctx'; tokens: number; percent: number }
 /** `remaining` is the share of the cache TTL still warm (0 once expired); `label` the countdown text. */
 export type WarmPill = { id: 'warm'; remaining: number; label: string }
-export type Pill = RatePill | ValuePill | ContextPill | WarmPill
+export type Pill = RatePill | ValuePill | HitPill | ContextPill | WarmPill
 /** When the main thread last refreshed its prompt cache, and the TTL that refresh reset: the warm pill's inputs. */
 export type WarmReading = { at: number; ttl: number }
 
@@ -97,8 +99,9 @@ export const pillsOf = (limits: Limit[], tokens: Tokens | null, cost: number | n
     pills.push(pill)
   }
   if (tokens) {
-    pills.push({ id: 'in', value: formatTokens(tokens.input) })
-    pills.push({ id: 'out', value: formatTokens(tokens.output) })
+    // Hit rate: reads over every prompt token (input, cache writes, reads); none before the first one.
+    const prompt = tokens.input + tokens.cache
+    if (prompt > 0) pills.push({ id: 'hit', percent: Math.round((tokens.cache * 100) / prompt) })
     pills.push({ id: 'cache', value: formatTokens(tokens.cache) })
   }
   if (warm !== null) {
@@ -119,6 +122,8 @@ export const isRate = (p: Pill): p is RatePill => p.id === '5h' || p.id === '7d'
 export const ctxLevel = (percent: number) => (percent > 85 ? 'high' : percent >= 60 ? 'warn' : 'ok')
 /** Warm step: above half the TTL calm, 20-50% amber, under 20% red, expired muted. */
 export const warmLevel = (remaining: number) => (remaining <= 0 ? 'cold' : remaining > 0.5 ? 'ok' : remaining >= 0.2 ? 'warn' : 'high')
+/** Hit rate step: 80% and up calm, 50-80% amber, under 50% red. */
+export const hitLevel = (percent: number) => (percent >= 80 ? 'ok' : percent >= 50 ? 'warn' : 'high')
 
 export const STRIP_BG = '#f1f0ec'
 const INK = '#2b2b2b'
@@ -134,8 +139,6 @@ export const COLORS = {
   '5h': { bg: '#dce8e4', fg: '#3d8c7d' },
   '7d': WEEK,
   fable: WEEK,
-  in: { bg: '#f4ddd9', fg: '#d0553f' },
-  out: { bg: '#dde9dc', fg: '#4c9a50' },
   cache: { bg: '#dfe2f7', fg: '#4a5bd6' },
   cost: { bg: '#f1ebd8', fg: '#c4952a' },
 } as const
@@ -157,7 +160,8 @@ export const alt = (p: Pill): string => {
   }
   if (p.id === 'ctx') return `context ${formatCtxTokens(p.tokens)} tokens (${p.percent}% of window)`
   if (p.id === 'warm') return p.label === 'cold' ? 'Prompt cache cold' : `Prompt cache warm for ${p.label}`
-  return { in: 'Input tokens', out: 'Output tokens', cache: 'Cache read', cost: 'Session cost' }[p.id] + ` ${p.value}`
+  if (p.id === 'hit') return `Cache hit rate ${p.percent}%`
+  return { cache: 'Cache read', cost: 'Session cost' }[p.id] + ` ${p.value}`
 }
 
 // Icons: 24-unit stroke paths (Lucide-style), drawn at ICON px.
@@ -170,8 +174,8 @@ const ICONS = {
   sparkle:
     '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/>',
   history: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
-  in: '<path d="M12 3v11M7 8l5-5 5 5"/><rect x="3" y="15" width="18" height="6" rx="2"/>',
-  out: '<path d="M12 2v11M7 8l5 5 5-5"/><rect x="3" y="15" width="18" height="6" rx="2"/>',
+  // Lucide target
+  hit: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
   cache:
     '<path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/>' +
     '<path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
@@ -207,7 +211,15 @@ const text = (s: string, x: number, color: string, bold = false) =>
 /** One pill as an SVG document and its width in CSS pixels. */
 export const pillSvg = (p: Pill): { source: string; width: number } => {
   const { bg, fg } =
-    p.id === 'ctx' ? CTX_COLORS[ctxLevel(p.percent)] : p.id === 'warm' ? CTX_COLORS[warmLevel(p.remaining)] : isRate(p) && p.age !== undefined ? CTX_COLORS.cold : COLORS[p.id]
+    p.id === 'ctx'
+      ? CTX_COLORS[ctxLevel(p.percent)]
+      : p.id === 'warm'
+        ? CTX_COLORS[warmLevel(p.remaining)]
+        : p.id === 'hit'
+          ? CTX_COLORS[hitLevel(p.percent)]
+          : isRate(p) && p.age !== undefined
+            ? CTX_COLORS.cold
+            : COLORS[p.id]
   const parts: string[] = []
   let x = 9
   if (isRate(p)) {
@@ -261,6 +273,18 @@ export const pillSvg = (p: Pill): { source: string; width: number } => {
     x += CTX_BAR + 8
     parts.push(text(p.label, x, INK, true))
     x += p.label.length * CHAR + 10
+  } else if (p.id === 'hit') {
+    parts.push(icon('hit', x, ICON, fg))
+    x += ICON + 7
+    const y = (H - 4) / 2
+    parts.push(
+      `<rect x="${x}" y="${y}" width="${CTX_BAR}" height="4" rx="2" fill="${TRACK}"/>`,
+      `<rect x="${x}" y="${y}" width="${(CTX_BAR * p.percent) / 100}" height="4" rx="2" fill="${fg}"/>`,
+    )
+    x += CTX_BAR + 8
+    const pct = `${p.percent}%`
+    parts.push(text(pct, x, INK, true))
+    x += pct.length * CHAR + 10
   } else {
     parts.push(icon(p.id, x, ICON, fg))
     x += ICON + 7.5
@@ -287,15 +311,14 @@ const GLYPHS = {
     '7d': '\u{f00ed}', // md-calendar
     fable: '\u{f0ae2}', // md-star_four_points
     left: '\u{f02da}', // md-history
-    in: '\u{f011d}', // md-tray_arrow_up
-    out: '\u{f0120}', // md-tray_arrow_down
+    hit: '\u{f04fe}', // md-target
     cache: '\u{f0328}', // md-layers
     cost: '', // fa-coins: md has no currency-usd circle
     ctx: '\u{f09d1}', // md-brain
     warm: '\u{f051f}', // md-timer_sand
   },
   // Glyphs Cascadia Mono has, all single width.
-  unicode: { caps: ['▐', '▌'], '5h': '◔', '7d': '▤', fable: '*', left: '◷', in: '↑', out: '↓', cache: '≡', cost: '◉', ctx: '◐', warm: '◶' },
+  unicode: { caps: ['▐', '▌'], '5h': '◔', '7d': '▤', fable: '*', left: '◷', hit: '◎', cache: '≡', cost: '◉', ctx: '◐', warm: '◶' },
 } as const
 
 const WEEK_DARK = { bg: '#2d2850', fg: '#a892ff' }
@@ -305,8 +328,6 @@ export const TERM_PALETTE = {
       '5h': { bg: '#1d3b36', fg: '#5ed0b8' },
       '7d': WEEK_DARK,
       fable: WEEK_DARK,
-      in: { bg: '#47231e', fg: '#ff7e66' },
-      out: { bg: '#1f3d23', fg: '#72d37c' },
       cache: { bg: '#242c55', fg: '#8796ff' },
       cost: { bg: '#40331a', fg: '#f2c24e' },
     },
@@ -335,7 +356,15 @@ export const termPill = (p: Pill, glyphs: Glyphs, light: boolean, step = 1): Run
   const g = GLYPHS[glyphs]
   const pal = TERM_PALETTE[light ? 'light' : 'dark']
   const { bg, fg } =
-    p.id === 'ctx' ? pal.ctx[ctxLevel(p.percent)] : p.id === 'warm' ? pal.ctx[warmLevel(p.remaining)] : isRate(p) && p.age !== undefined ? pal.ctx.cold : pal.pill[p.id]
+    p.id === 'ctx'
+      ? pal.ctx[ctxLevel(p.percent)]
+      : p.id === 'warm'
+        ? pal.ctx[warmLevel(p.remaining)]
+        : p.id === 'hit'
+          ? pal.ctx[hitLevel(p.percent)]
+          : isRate(p) && p.age !== undefined
+            ? pal.ctx.cold
+            : pal.pill[p.id]
   const runs: Run[] = []
   const put = (s: string, color: string, extra: Partial<Run> = {}) => {
     const run = { s, fg: color, bg, ...extra }
@@ -378,6 +407,11 @@ export const termPill = (p: Pill, glyphs: Glyphs, light: boolean, step = 1): Run
     bar(p.remaining * 100, step >= 3 ? 3 : 4, fg)
     put(' ', fg)
     put(p.label, pal.text, { bold: true })
+  } else if (p.id === 'hit') {
+    put(`${g.hit} `, fg)
+    bar(p.percent, step >= 3 ? 3 : 4, fg)
+    put(' ', fg)
+    put(`${p.percent}%`, pal.text, { bold: true })
   } else {
     put(`${g[p.id]} `, fg)
     put(p.value, pal.text)
@@ -388,8 +422,8 @@ export const termPill = (p: Pill, glyphs: Glyphs, light: boolean, step = 1): Run
 
 /**
  * The terminal row at `columns`, the first step that fits: 1 every pill;
- * 2 without the cache pill; 3 shorter bars (quota 6 -> 4 cells, context and
- * warm 4 -> 3); 4 compact time labels; 5 also without the token-total pills;
+ * 2 without the cache pill; 3 shorter bars (quota 6 -> 4 cells, context,
+ * warm and hit rate 4 -> 3); 4 compact time labels; 5 also without the hit rate pill;
  * 6 every pill, wrapped. Width counts one gap between pills; the cost pill's
  * spacer (one more gap) shows only when it fits.
  */
@@ -397,7 +431,7 @@ export const termLayout = (pills: Pill[], columns: number, glyphs: Glyphs, light
   const build = (step: number) => {
     const row = pills
       .filter(p => step < 2 || step > 5 || p.id !== 'cache')
-      .filter(p => step !== 5 || (p.id !== 'in' && p.id !== 'out'))
+      .filter(p => step !== 5 || p.id !== 'hit')
       .map(p => ({ id: p.id, runs: termPill(p, glyphs, light, step > 5 ? 1 : step) }))
     return { pills: row, width: row.reduce((n, p) => n + cells(p.runs) + 1, -1), step }
   }

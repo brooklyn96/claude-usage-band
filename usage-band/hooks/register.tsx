@@ -111,9 +111,9 @@ async function measured($: EngineInterface, rateLimits: readonly SessionRateLimi
 
 async function spent($: EngineInterface, u: ModelUsage | null | undefined) {
   if (!u) return
+  // Output tokens are no part of the hit rate, so they are not kept.
   await update($, tokensAtom, (t): Tokens => ({
     input: (t?.input ?? 0) + u.input_tokens + u.cache_creation_input_tokens,
-    output: (t?.output ?? 0) + u.output_tokens,
     cache: (t?.cache ?? 0) + u.cache_read_input_tokens,
   }))
 }
